@@ -1,9 +1,18 @@
-import { useState } from 'react'
-import { BadgePlus, Eye, EyeOff, UserPlus } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { BadgePlus, Check, Eye, EyeOff, TriangleAlert, UserPlus, X } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import ThemeToggle from '../components/ThemeToggle'
-import { authService } from '../services/api'
+import { authService, getErrorMessage } from '../services/api'
 import { useAuthStore } from '../store/authStore'
+
+/** Las mismas reglas que aplica el backend, para avisar antes de enviar. */
+const RULES = [
+  { id: 'length', label: 'Al menos 8 caracteres', test: (value: string) => value.length >= 8 },
+  { id: 'letter', label: 'Incluye una letra', test: (value: string) => /[a-zA-Z]/.test(value) },
+  { id: 'number', label: 'Incluye un número', test: (value: string) => /[0-9]/.test(value) },
+]
+
+const USERNAME_PATTERN = /^[a-zA-Z0-9_-]{3,30}$/
 
 export default function Register() {
   const [username, setUsername] = useState('')
@@ -11,7 +20,6 @@ export default function Register() {
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [capsLockOn, setCapsLockOn] = useState(false)
   const [firstName, setFirstName] = useState('')
   const [lastName, setLastName] = useState('')
@@ -20,175 +28,257 @@ export default function Register() {
   const navigate = useNavigate()
   const setAuth = useAuthStore((state) => state.setAuth)
 
-  const passwordStrength =
-    password.length >= 10
-      ? 'fuerte'
-      : password.length >= 6
-        ? 'media'
-        : 'baja'
+  const passedRules = useMemo(() => RULES.filter((rule) => rule.test(password)), [password])
+  const passwordOk = passedRules.length === RULES.length
+  const usernameOk = USERNAME_PATTERN.test(username.trim())
+  const passwordsMatch = password.length > 0 && password === confirmPassword
+  const canSubmit = usernameOk && email.trim().length > 3 && passwordOk && passwordsMatch && !loading
 
-  const passwordsMatch = password.length > 0 && confirmPassword.length > 0 && password === confirmPassword
+  const strengthLabel = passedRules.length === 0 ? '' : ['Débil', 'Débil', 'Aceptable', 'Buena'][passedRules.length]
+  const strengthTone =
+    passedRules.length < 2 ? 'var(--danger)' : passedRules.length < 3 ? 'var(--warning)' : 'var(--success)'
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault()
     setError('')
 
-    const normalizedEmail = email.trim().toLowerCase()
-    const normalizedUsername = username.trim()
-
-    if (password !== confirmPassword) {
-      setError('Las contraseñas no coinciden')
+    if (!usernameOk) {
+      setError('El usuario debe tener entre 3 y 30 caracteres, solo letras, números, guion y guion bajo.')
       return
     }
-
-    if (password.length < 6) {
-      setError('La contraseña debe tener al menos 6 caracteres')
+    if (!passwordOk) {
+      setError('La contraseña debe tener 8+ caracteres, con al menos una letra y un número.')
+      return
+    }
+    if (!passwordsMatch) {
+      setError('Las contraseñas no coinciden.')
       return
     }
 
     setLoading(true)
-
     try {
       const response = await authService.register({
-        username: normalizedUsername,
-        email: normalizedEmail,
+        username: username.trim(),
+        email: email.trim().toLowerCase(),
         password,
         firstName: firstName.trim() || undefined,
         lastName: lastName.trim() || undefined,
       })
       const { token, user } = response.data
       setAuth(user, token)
-      navigate('/dashboard')
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Registration failed')
+      navigate('/dashboard', { replace: true })
+    } catch (err) {
+      setError(getErrorMessage(err, 'No se ha podido crear la cuenta.'))
     } finally {
       setLoading(false)
     }
   }
 
   return (
-    <main className="min-h-screen flex items-center justify-center px-4 py-8">
-      <section className="panel max-w-md w-full p-8">
-        <div className="flex justify-end mb-3">
+    <main className="flex min-h-screen items-center justify-center px-4 py-10">
+      <div className="w-full max-w-md space-y-4">
+        <div className="flex justify-end">
           <ThemeToggle />
         </div>
-        <h1 className="app-title mb-2 text-center text-4xl font-bold text-slate-900 dark:text-slate-100">GYMESIS</h1>
-        
-        <h2 className="text-center section-subtitle mb-6 inline-flex items-center gap-1 justify-center w-full"><BadgePlus size={15} />Crea tu cuenta</h2>
 
-        <form onSubmit={handleSubmit} className="space-y-3">
-          {error && (
-            <div role="alert" className="status-error text-sm">
-              {error}
-            </div>
-          )}
-          
-          <div>
-            <label className="field-label" htmlFor="username">Username</label>
-            <input
-              id="username"
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="field"
-              required
-            />
+        <section className="panel animate-in p-8" style={{ boxShadow: 'var(--shadow-lg)' }}>
+          <div className="mb-6 text-center">
+            <h1 className="app-title text-4xl font-bold">GYMESIS</h1>
+            <p className="section-subtitle mt-1 inline-flex items-center gap-1.5">
+              <BadgePlus size={15} />
+              Crea tu cuenta en un minuto
+            </p>
           </div>
 
-          <div>
-            <label className="field-label" htmlFor="email">Email</label>
-            <input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="field"
-              required
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="field-label" htmlFor="firstName">Nombre</label>
-              <input
-                id="firstName"
-                type="text"
-                value={firstName}
-                onChange={(e) => setFirstName(e.target.value)}
-                className="field"
-              />
-            </div>
-            <div>
-              <label className="field-label" htmlFor="lastName">Apellido</label>
-              <input
-                id="lastName"
-                type="text"
-                value={lastName}
-                onChange={(e) => setLastName(e.target.value)}
-                className="field"
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="field-label" htmlFor="password">Contraseña</label>
-            <div className="relative">
-              <input
-                id="password"
-                type={showPassword ? 'text' : 'password'}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyUp={(e) => setCapsLockOn(e.getModifierState('CapsLock'))}
-                className="field pr-10"
-                required
-              />
-              <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 btn-soft !p-1" onClick={() => setShowPassword((v) => !v)}>
-                {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
-              </button>
-            </div>
-            <div className="soft-text text-xs mt-1">Fuerza de contraseña: {passwordStrength}</div>
-            {capsLockOn && <div className="status-warning text-xs mt-1">Bloq Mayus activado</div>}
-          </div>
-
-          <div>
-            <label className="field-label" htmlFor="confirmPassword">Confirmar Contraseña</label>
-            <div className="relative">
-              <input
-                id="confirmPassword"
-                type={showConfirmPassword ? 'text' : 'password'}
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                onKeyUp={(e) => setCapsLockOn(e.getModifierState('CapsLock'))}
-                className="field pr-10"
-                required
-              />
-              <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 btn-soft !p-1" onClick={() => setShowConfirmPassword((v) => !v)}>
-                {showConfirmPassword ? <EyeOff size={14} /> : <Eye size={14} />}
-              </button>
-            </div>
-            {confirmPassword.length > 0 && (
-              <div className={`text-xs mt-1 ${passwordsMatch ? 'text-emerald-600 dark:text-emerald-300' : 'text-red-600 dark:text-red-300'}`}>
-                {passwordsMatch ? 'Las contraseñas coinciden' : 'Las contraseñas no coinciden'}
+          <form onSubmit={handleSubmit} className="space-y-3.5" noValidate>
+            {error && (
+              <div role="alert" className="status-error">
+                <TriangleAlert size={16} className="mt-0.5 shrink-0" />
+                <span>{error}</span>
               </div>
             )}
-          </div>
 
-          <button
-            type="submit"
-            disabled={loading || !username.trim() || !email.trim() || !password || !confirmPassword}
-            className="w-full btn-primary disabled:opacity-50 mt-4 inline-flex items-center justify-center gap-2"
-          >
-            {loading ? 'Registrando...' : <><UserPlus size={16} />Registrarse</>}
-          </button>
-        </form>
+            <div>
+              <label className="field-label" htmlFor="username">
+                Nombre de usuario
+              </label>
+              <input
+                id="username"
+                type="text"
+                autoComplete="username"
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                className={`field ${username && !usernameOk ? 'field-error' : ''}`}
+                placeholder="atleta_99"
+                required
+              />
+              {username && !usernameOk && (
+                <p className="mt-1 text-xs" style={{ color: 'var(--danger)' }}>
+                  Entre 3 y 30 caracteres. Solo letras, números, guion y guion bajo.
+                </p>
+              )}
+            </div>
 
-        <p className="mt-4 text-center section-subtitle text-sm">
-          ¿Ya tienes cuenta?{' '}
-          <Link to="/login" className="text-sky-500 hover:underline font-semibold">
-            Inicia sesión
-          </Link>
-        </p>
-      </section>
+            <div>
+              <label className="field-label" htmlFor="email">
+                Email
+              </label>
+              <input
+                id="email"
+                type="email"
+                autoComplete="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                className="field"
+                placeholder="tu@email.com"
+                required
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="field-label" htmlFor="firstName">
+                  Nombre
+                </label>
+                <input
+                  id="firstName"
+                  type="text"
+                  autoComplete="given-name"
+                  value={firstName}
+                  onChange={(event) => setFirstName(event.target.value)}
+                  className="field"
+                />
+              </div>
+              <div>
+                <label className="field-label" htmlFor="lastName">
+                  Apellido
+                </label>
+                <input
+                  id="lastName"
+                  type="text"
+                  autoComplete="family-name"
+                  value={lastName}
+                  onChange={(event) => setLastName(event.target.value)}
+                  className="field"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="field-label" htmlFor="password">
+                Contraseña
+              </label>
+              <div className="relative">
+                <input
+                  id="password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="new-password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  onKeyUp={(event) => setCapsLockOn(event.getModifierState('CapsLock'))}
+                  onBlur={() => setCapsLockOn(false)}
+                  className="field pr-11"
+                  required
+                />
+                <button
+                  type="button"
+                  className="btn-ghost absolute right-1 top-1/2 -translate-y-1/2 p-2"
+                  onClick={() => setShowPassword((value) => !value)}
+                  aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                  tabIndex={-1}
+                >
+                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+
+              {password && (
+                <div className="mt-2 space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <div className="meter flex-1">
+                      <span
+                        style={{
+                          width: `${(passedRules.length / RULES.length) * 100}%`,
+                          background: strengthTone,
+                        }}
+                      />
+                    </div>
+                    <span className="text-xs font-semibold" style={{ color: strengthTone }}>
+                      {strengthLabel}
+                    </span>
+                  </div>
+                  <ul className="space-y-0.5">
+                    {RULES.map((rule) => {
+                      const ok = rule.test(password)
+                      return (
+                        <li
+                          key={rule.id}
+                          className="flex items-center gap-1.5 text-xs"
+                          style={{ color: ok ? 'var(--success)' : 'var(--text-faint)' }}
+                        >
+                          {ok ? <Check size={12} /> : <X size={12} />}
+                          {rule.label}
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </div>
+              )}
+
+              {capsLockOn && (
+                <div className="status-warning mt-2 text-xs">
+                  <TriangleAlert size={14} className="mt-0.5 shrink-0" />
+                  <span>Bloq Mayús está activado</span>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className="field-label" htmlFor="confirmPassword">
+                Repite la contraseña
+              </label>
+              <input
+                id="confirmPassword"
+                type={showPassword ? 'text' : 'password'}
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                className={`field ${confirmPassword && !passwordsMatch ? 'field-error' : ''}`}
+                required
+              />
+              {confirmPassword.length > 0 && (
+                <p
+                  className="mt-1 flex items-center gap-1 text-xs"
+                  style={{ color: passwordsMatch ? 'var(--success)' : 'var(--danger)' }}
+                >
+                  {passwordsMatch ? <Check size={12} /> : <X size={12} />}
+                  {passwordsMatch ? 'Las contraseñas coinciden' : 'Las contraseñas no coinciden'}
+                </p>
+              )}
+            </div>
+
+            <button type="submit" disabled={!canSubmit} className="btn-primary mt-2 w-full">
+              {loading ? (
+                <>
+                  <span className="loader" />
+                  Creando cuenta...
+                </>
+              ) : (
+                <>
+                  <UserPlus size={16} />
+                  Crear cuenta
+                </>
+              )}
+            </button>
+          </form>
+
+          <p className="section-subtitle mt-5 text-center text-sm">
+            ¿Ya tienes cuenta?{' '}
+            <Link to="/login" className="font-semibold hover:underline" style={{ color: 'var(--brand-strong)' }}>
+              Inicia sesión
+            </Link>
+          </p>
+        </section>
+      </div>
     </main>
   )
 }

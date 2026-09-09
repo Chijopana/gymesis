@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react'
-import { Dumbbell, Eye, EyeOff, LogIn } from 'lucide-react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Dumbbell, Eye, EyeOff, LogIn, TriangleAlert } from 'lucide-react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import ThemeToggle from '../components/ThemeToggle'
-import { authService } from '../services/api'
+import { authService, getErrorMessage } from '../services/api'
 import { useAuthStore } from '../store/authStore'
+
+const REMEMBER_KEY = 'gymesis-remember-email'
+const REDIRECT_KEY = 'gymesis-redirect-after-login'
 
 export default function Login() {
   const [email, setEmail] = useState('')
@@ -14,116 +17,168 @@ export default function Login() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
+  const location = useLocation()
   const setAuth = useAuthStore((state) => state.setAuth)
 
   useEffect(() => {
-    const saved = localStorage.getItem('gymesis-remember-email')
-    if (saved) setEmail(saved)
+    try {
+      const saved = localStorage.getItem(REMEMBER_KEY)
+      if (saved) setEmail(saved)
+      else setRememberEmail(false)
+    } catch {
+      /* almacenamiento bloqueado */
+    }
   }, [])
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault()
     setError('')
+
     const normalizedEmail = email.trim().toLowerCase()
-    if (!normalizedEmail || !password.trim()) {
-      setError('Completa email y contraseña')
+    if (!normalizedEmail || !password) {
+      setError('Completa el email y la contraseña.')
       return
     }
-    setLoading(true)
 
+    setLoading(true)
     try {
-      const response = await authService.login({ email: normalizedEmail, password: password.trim() })
+      const response = await authService.login({ email: normalizedEmail, password })
       const { token, user } = response.data
       setAuth(user, token)
-      if (rememberEmail) {
-        localStorage.setItem('gymesis-remember-email', normalizedEmail)
-      } else {
-        localStorage.removeItem('gymesis-remember-email')
+
+      try {
+        if (rememberEmail) localStorage.setItem(REMEMBER_KEY, normalizedEmail)
+        else localStorage.removeItem(REMEMBER_KEY)
+      } catch {
+        /* almacenamiento bloqueado */
       }
-      const redirectTo = localStorage.getItem('gymesis-redirect-after-login') || '/dashboard'
-      localStorage.removeItem('gymesis-redirect-after-login')
-      navigate(redirectTo)
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Login failed')
+
+      // Destino: el que intentó abrir antes de que le pidieran sesión.
+      const fromState = (location.state as { from?: string } | null)?.from
+      let stored: string | null = null
+      try {
+        stored = localStorage.getItem(REDIRECT_KEY)
+        localStorage.removeItem(REDIRECT_KEY)
+      } catch {
+        /* almacenamiento bloqueado */
+      }
+      navigate(fromState || stored || '/dashboard', { replace: true })
+    } catch (err) {
+      setError(getErrorMessage(err, 'No se ha podido iniciar sesión.'))
     } finally {
       setLoading(false)
     }
   }
 
   return (
-    <main className="min-h-screen flex items-center justify-center px-4">
-      <section className="panel max-w-md w-full p-8">
-        <div className="flex justify-end mb-3">
+    <main className="flex min-h-screen items-center justify-center px-4 py-10">
+      <div className="w-full max-w-md space-y-4">
+        <div className="flex justify-end">
           <ThemeToggle />
         </div>
-        <h1 className="app-title mb-2 text-center text-4xl font-bold text-slate-900 dark:text-slate-100">GYMESIS</h1>
-        <p className="text-center section-subtitle mb-6">Entrena inteligente. Compite con precision.</p>
-        
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {error && (
-            <div role="alert" className="status-error">
-              {error}
+
+        <section className="panel animate-in p-8" style={{ boxShadow: 'var(--shadow-lg)' }}>
+          <div className="mb-7 text-center">
+            <div
+              className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl"
+              style={{ background: 'var(--brand-tint-strong)', color: 'var(--brand-strong)' }}
+            >
+              <Dumbbell size={28} />
             </div>
-          )}
-          
-          <div>
-            <label className="field-label" htmlFor="email">Email</label>
-            <input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="field"
-              required
-            />
+            <h1 className="app-title text-4xl font-bold">GYMESIS</h1>
+            <p className="section-subtitle mt-1">Entrena con datos. Compite con amigos.</p>
           </div>
 
-          <div>
-            <label className="field-label" htmlFor="password">Contraseña</label>
-            <div className="relative">
+          <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+            {error && (
+              <div role="alert" className="status-error">
+                <TriangleAlert size={16} className="mt-0.5 shrink-0" />
+                <span>{error}</span>
+              </div>
+            )}
+
+            <div>
+              <label className="field-label" htmlFor="email">
+                Email
+              </label>
               <input
-                id="password"
-                type={showPassword ? 'text' : 'password'}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyUp={(e) => setCapsLockOn(e.getModifierState('CapsLock'))}
-                className="field pr-10"
+                id="email"
+                type="email"
+                autoComplete="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                className="field"
+                placeholder="tu@email.com"
                 required
               />
-              <button
-                type="button"
-                className="absolute right-2 top-1/2 -translate-y-1/2 btn-soft !p-1"
-                onClick={() => setShowPassword((v) => !v)}
-                aria-label="Mostrar u ocultar contraseña"
-              >
-                {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
-              </button>
             </div>
-          </div>
 
-          {capsLockOn && <div className="status-warning text-sm">Bloq Mayus activado</div>}
+            <div>
+              <label className="field-label" htmlFor="password">
+                Contraseña
+              </label>
+              <div className="relative">
+                <input
+                  id="password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  onKeyUp={(event) => setCapsLockOn(event.getModifierState('CapsLock'))}
+                  onBlur={() => setCapsLockOn(false)}
+                  className="field pr-11"
+                  required
+                />
+                <button
+                  type="button"
+                  className="btn-ghost absolute right-1 top-1/2 -translate-y-1/2 p-2"
+                  onClick={() => setShowPassword((value) => !value)}
+                  aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                  tabIndex={-1}
+                >
+                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              {capsLockOn && (
+                <div className="status-warning mt-2 text-sm">
+                  <TriangleAlert size={15} className="mt-0.5 shrink-0" />
+                  <span>Bloq Mayús está activado</span>
+                </div>
+              )}
+            </div>
 
-          <label className="inline-flex items-center gap-2 text-sm soft-text">
-            <input type="checkbox" checked={rememberEmail} onChange={(e) => setRememberEmail(e.target.checked)} />
-            Recordar email en este dispositivo
-          </label>
+            <label className="soft-text flex cursor-pointer items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={rememberEmail}
+                onChange={(event) => setRememberEmail(event.target.checked)}
+              />
+              Recordar mi email en este dispositivo
+            </label>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full btn-primary disabled:opacity-50 inline-flex items-center justify-center gap-2"
-          >
-            {loading ? 'Cargando...' : <><LogIn size={16} />Iniciar Sesion</>}
-          </button>
-        </form>
+            <button type="submit" disabled={loading} className="btn-primary w-full">
+              {loading ? (
+                <>
+                  <span className="loader" />
+                  Entrando...
+                </>
+              ) : (
+                <>
+                  <LogIn size={16} />
+                  Iniciar sesión
+                </>
+              )}
+            </button>
+          </form>
 
-        <p className="mt-4 text-center section-subtitle">
-          ¿No tienes cuenta?{' '}
-          <Link to="/register" className="text-sky-500 hover:underline font-semibold">
-            <span className="inline-flex items-center gap-1"><Dumbbell size={14} />Registrate</span>
-          </Link>
-        </p>
-      </section>
+          <p className="section-subtitle mt-6 text-center text-sm">
+            ¿No tienes cuenta?{' '}
+            <Link to="/register" className="font-semibold hover:underline" style={{ color: 'var(--brand-strong)' }}>
+              Créala gratis
+            </Link>
+          </p>
+        </section>
+      </div>
     </main>
   )
 }

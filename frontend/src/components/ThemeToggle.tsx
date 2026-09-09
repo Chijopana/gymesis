@@ -1,25 +1,48 @@
 import { useEffect, useState } from 'react'
-import { Moon, Sun } from 'lucide-react'
-import { applyTheme, getInitialTheme, type Theme } from '../utils/theme'
+import { Monitor, Moon, Sun } from 'lucide-react'
+import { applyTheme, getStoredTheme, watchSystemTheme, type Theme } from '../utils/theme'
+
+const OPTIONS: Array<{ value: Theme; label: string; icon: typeof Sun }> = [
+  { value: 'light', label: 'Claro', icon: Sun },
+  { value: 'dark', label: 'Oscuro', icon: Moon },
+  { value: 'system', label: 'Sistema', icon: Monitor },
+]
 
 export default function ThemeToggle() {
-  const [theme, setTheme] = useState<Theme>(() => getInitialTheme())
+  const [theme, setTheme] = useState<Theme>(() => getStoredTheme())
 
   useEffect(() => {
     applyTheme(theme)
+    // En modo "system" hay que repintar si el usuario cambia el tema del SO.
+    if (theme !== 'system') return
+    return watchSystemTheme(() => applyTheme('system'))
   }, [theme])
 
   return (
-    <button
-      type="button"
-      onClick={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
-      className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-400/40 text-xs md:text-sm text-slate-700 bg-white/70 hover:bg-white dark:text-slate-100 dark:bg-slate-900 dark:border-slate-600"
-      aria-label="Cambiar modo oscuro"
-      aria-pressed={theme === 'dark'}
-      title="Cambiar tema"
+    <div
+      className="inline-flex items-center gap-0.5 rounded-lg border p-0.5"
+      style={{ borderColor: 'var(--line-strong)', background: 'var(--panel-sunken)' }}
+      role="group"
+      aria-label="Tema de la interfaz"
     >
-      {theme === 'dark' ? <Moon size={14} /> : <Sun size={14} />}
-      <span>{theme === 'dark' ? 'Oscuro' : 'Claro'}</span>
-    </button>
+      {OPTIONS.map(({ value, label, icon: Icon }) => (
+        <button
+          key={value}
+          type="button"
+          onClick={() => setTheme(value)}
+          className="rounded-md px-2 py-1.5 transition-colors"
+          style={
+            theme === value
+              ? { background: 'var(--brand-tint-strong)', color: 'var(--brand-strong)' }
+              : { color: 'var(--text-faint)' }
+          }
+          aria-pressed={theme === value}
+          title={`Tema: ${label}`}
+        >
+          <Icon size={15} />
+          <span className="sr-only">{label}</span>
+        </button>
+      ))}
+    </div>
   )
 }

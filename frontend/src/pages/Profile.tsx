@@ -1,321 +1,502 @@
-import { useEffect, useState } from 'react'
-import { BadgeCheck, ClipboardCopy, Dumbbell, Mail, UserCircle2, UserRound, ImagePlus } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import {
+  BadgeCheck,
+  ClipboardCopy,
+  Dumbbell,
+  ImagePlus,
+  Images,
+  Mail,
+  Trash2,
+  UserCircle2,
+  UserRound,
+} from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import PageHeader from '../components/PageHeader'
-import { userService } from '../services/api'
+import { Skeleton } from '../components/Skeleton'
+import { useConfirm } from '../components/ConfirmDialog'
+import { getErrorMessage, userService } from '../services/api'
+import { emitFeedback } from '../utils/feedback'
+import { useAuthStore } from '../store/authStore'
 
-interface ProfileData {
+type ProfileData = {
   user: {
     id: string
     username: string
     email: string
-    firstName?: string
-    lastName?: string
-    favoriteMuscle?: string
-    bio?: string
-    profileImageUrl?: string
+    firstName?: string | null
+    lastName?: string | null
+    favoriteMuscle?: string | null
+    bio?: string | null
+    profileImageUrl?: string | null
+    createdAt?: string
   }
-  routines: Array<{ id: string; name: string; description?: string }>
-  groups: Array<{ id: string; name: string; description?: string; groupImageUrl?: string; routineName?: string }>
+  // El backend devuelve estas colecciones en snake_case, tal cual salen de SQL.
+  routines: Array<{ id: string; name: string; description?: string; is_public?: boolean; exercises_count?: number }>
+  groups: Array<{ id: string; name: string; description?: string; routine_name?: string | null; members_count?: number }>
   photos: Array<{ id: string; image_url: string; caption?: string; taken_at?: string }>
-  stats?: { completedTrainings?: number }
+  stats?: { completedTrainings?: number; trainingDays?: number; totalVolumeKg?: number }
+  social?: { followersCount?: number; followingCount?: number }
 }
+
+const MUSCLE_OPTIONS = ['Pecho', 'Espalda', 'Hombros', 'Biceps', 'Triceps', 'Pierna', 'Gluteos', 'Core']
+const BIO_MAX = 240
 
 export default function Profile() {
   const navigate = useNavigate()
+  const { confirm, confirmDialog } = useConfirm()
+  const updateUser = useAuthStore((state) => state.updateUser)
+
   const [profile, setProfile] = useState<ProfileData | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
-  const [statusMessage, setStatusMessage] = useState('')
-  const [form, setForm] = useState({
-    firstName: '',
-    lastName: '',
-    favoriteMuscle: '',
-    bio: '',
-    profileImageUrl: '',
-  })
+  const [form, setForm] = useState({ firstName: '', lastName: '', favoriteMuscle: '', bio: '', profileImageUrl: '' })
   const [photoForm, setPhotoForm] = useState({ imageUrl: '', caption: '', takenAt: '' })
+  const [addingPhoto, setAddingPhoto] = useState(false)
 
-  const loadProfile = async () => {
+  const fillForm = (data: ProfileData) => {
+    setForm({
+      firstName: data.user.firstName ?? '',
+      lastName: data.user.lastName ?? '',
+      favoriteMuscle: data.user.favoriteMuscle ?? '',
+      bio: data.user.bio ?? '',
+      profileImageUrl: data.user.profileImageUrl ?? '',
+    })
+  }
+
+  const loadProfile = useCallback(async () => {
     try {
       setLoading(true)
+      setError('')
       const response = await userService.getProfile()
       const data = response.data as ProfileData
       setProfile(data)
-      setForm({
-        firstName: data.user.firstName || '',
-        lastName: data.user.lastName || '',
-        favoriteMuscle: data.user.favoriteMuscle || '',
-        bio: data.user.bio || '',
-        profileImageUrl: data.user.profileImageUrl || '',
-      })
-      setError('')
-      setStatusMessage('')
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'No se pudo cargar el perfil')
+      fillForm(data)
+    } catch (err) {
+      setError(getErrorMessage(err, 'No se ha podido cargar el perfil.'))
     } finally {
       setLoading(false)
     }
-  }
-
-  useEffect(() => {
-    loadProfile()
   }, [])
 
   useEffect(() => {
-    if (!statusMessage) return
-    const timer = window.setTimeout(() => setStatusMessage(''), 2600)
-    return () => window.clearTimeout(timer)
-  }, [statusMessage])
+    loadProfile()
+  }, [loadProfile])
 
-  const saveProfile = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const saveProfile = async (event: React.FormEvent) => {
+    event.preventDefault()
     try {
       setSaving(true)
-      await userService.updateProfile(form)
+      setError('')
+      const response = await userService.updateProfile(form)
+      // El navbar muestra el avatar: se actualiza sin recargar la sesión entera.
+      if (response.data?.user) updateUser(response.data.user)
       await loadProfile()
-      setStatusMessage('Perfil actualizado correctamente')
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'No se pudo actualizar el perfil')
+      emitFeedback({ kind: 'success', title: 'Perfil actualizado' })
+    } catch (err) {
+      const message = getErrorMessage(err, 'No se ha podido actualizar el perfil.')
+      setError(message)
+      emitFeedback({ kind: 'error', title: 'No se ha podido guardar', message })
     } finally {
       setSaving(false)
     }
   }
 
-  const resetForm = () => {
-    if (!profile) return
-    setForm({
-      firstName: profile.user.firstName || '',
-      lastName: profile.user.lastName || '',
-      favoriteMuscle: profile.user.favoriteMuscle || '',
-      bio: profile.user.bio || '',
-      profileImageUrl: profile.user.profileImageUrl || '',
-    })
-    setStatusMessage('Cambios descartados')
-  }
+  const addPhoto = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!photoForm.imageUrl.trim()) return
 
-  const completionItems = [form.firstName, form.lastName, form.favoriteMuscle, form.bio]
-  const completion = Math.round((completionItems.filter((x) => x.trim().length > 0).length / completionItems.length) * 100)
-
-  const copySummary = async () => {
-    if (!profile) return
-    const text = `Atleta: ${profile.user.username} | Rutinas: ${profile.routines.length} | Grupos: ${profile.groups.length}`
     try {
-      await navigator.clipboard.writeText(text)
-      setStatusMessage('Resumen copiado al portapapeles')
-    } catch {
-      setStatusMessage('No se pudo copiar el resumen')
-    }
-  }
-
-  const addPhoto = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!photoForm.imageUrl.trim()) {
-      setStatusMessage('Debes indicar una URL de imagen para la galería')
-      return
-    }
-    try {
-      await userService.addProgressPhoto(photoForm)
+      setAddingPhoto(true)
+      await userService.addProgressPhoto({
+        imageUrl: photoForm.imageUrl.trim(),
+        caption: photoForm.caption.trim() || undefined,
+        takenAt: photoForm.takenAt || undefined,
+      })
       setPhotoForm({ imageUrl: '', caption: '', takenAt: '' })
       await loadProfile()
-      setStatusMessage('Foto agregada a tu galería')
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'No se pudo agregar la foto')
+      emitFeedback({ kind: 'success', title: 'Foto añadida a tu galería' })
+    } catch (err) {
+      emitFeedback({ kind: 'error', title: 'No se ha podido añadir la foto', message: getErrorMessage(err) })
+    } finally {
+      setAddingPhoto(false)
     }
   }
 
   const removePhoto = async (photoId: string) => {
+    const ok = await confirm({
+      title: 'Eliminar foto',
+      message: 'Esta foto desaparecerá de tu galería de progreso. No se puede deshacer.',
+      confirmLabel: 'Eliminar',
+      tone: 'danger',
+    })
+    if (!ok) return
+
     try {
       await userService.deleteProgressPhoto(photoId)
       await loadProfile()
-      setStatusMessage('Foto eliminada de tu galería')
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'No se pudo eliminar la foto')
+      emitFeedback({ kind: 'info', title: 'Foto eliminada' })
+    } catch (err) {
+      emitFeedback({ kind: 'error', title: 'No se ha podido eliminar', message: getErrorMessage(err) })
     }
   }
+
+  const copySummary = async () => {
+    if (!profile) return
+    const text = `${profile.user.username} en Gymesis · ${profile.routines.length} rutinas · ${profile.groups.length} grupos · ${profile.stats?.trainingDays ?? 0} días entrenados`
+    try {
+      await navigator.clipboard.writeText(text)
+      emitFeedback({ kind: 'info', title: 'Resumen copiado' })
+    } catch {
+      emitFeedback({ kind: 'warning', title: 'No se ha podido copiar', message: 'Tu navegador ha bloqueado el portapapeles.' })
+    }
+  }
+
+  const completionFields = [form.firstName, form.lastName, form.favoriteMuscle, form.bio, form.profileImageUrl]
+  const completion = Math.round((completionFields.filter((value) => value.trim().length > 0).length / completionFields.length) * 100)
 
   return (
     <>
       <Navbar />
+      {confirmDialog}
       <main id="main-content" className="page-shell">
         <PageHeader
           icon={<UserCircle2 className="title-icon" />}
-          title="Perfil atleta"
-          subtitle="Tu identidad deportiva, tus grupos y tus rutinas activas en un solo lugar."
+          title="Tu perfil"
+          subtitle="Tu identidad deportiva, tus grupos y tu galería de progreso."
           actions={
             <>
-              {profile?.user.id && <button className="btn-soft text-sm" onClick={() => navigate(`/users/${profile.user.id}`)}>Ver perfil público</button>}
+              <button className="btn-soft btn-sm" onClick={copySummary}>
+                <ClipboardCopy size={14} />
+                Copiar resumen
+              </button>
+              {profile?.user.id && (
+                <button className="btn-soft btn-sm" onClick={() => navigate(`/users/${profile.user.id}`)}>
+                  Ver como lo ven otros
+                </button>
+              )}
             </>
           }
+          meta={
+            !loading && profile ? (
+              <>
+                <span className="tiny-badge">Días entrenados: {profile.stats?.trainingDays ?? 0}</span>
+                <span className="tiny-badge">
+                  Volumen total: {Math.round(profile.stats?.totalVolumeKg ?? 0).toLocaleString('es-ES')} kg
+                </span>
+                <span className="tiny-badge">Seguidores: {profile.social?.followersCount ?? 0}</span>
+                <span className="tiny-badge">Siguiendo: {profile.social?.followingCount ?? 0}</span>
+              </>
+            ) : null
+          }
         />
-        {error && <div className="mb-4 status-error">{error}</div>}
-        {statusMessage && <div className="mb-4 status-success">{statusMessage}</div>}
-        <section className="panel p-4 mb-6 stack-gap">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="soft-text">Completitud de perfil: <strong className="text-slate-900 dark:text-slate-100">{completion}%</strong></div>
-            <div className="tiny-badge">Entrenos completados: {profile?.stats?.completedTrainings || 0}</div>
-            <button className="btn-soft text-sm inline-flex items-center gap-1" onClick={copySummary}><ClipboardCopy size={14} />Copiar resumen</button>
+
+        {error && (
+          <div role="alert" className="status-error mb-4">
+            {error}
           </div>
-          <div className="text-sm soft-text">Perfil simple: completa lo esencial, guarda y sigue entrenando.</div>
-          <div className="w-full rounded-full h-2 bg-slate-300/50 dark:bg-slate-700 mt-2 overflow-hidden">
-            <div className="h-full bg-gradient-to-r from-sky-400 to-emerald-500" style={{ width: `${completion}%` }} />
+        )}
+
+        <section className="panel mb-6 p-5">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <span className="soft-text text-sm">
+              Perfil completo al <strong style={{ color: 'var(--text-main)' }}>{completion}%</strong>
+            </span>
+            {completion < 100 && <span className="soft-text text-xs">Completa los campos vacíos para destacar</span>}
+          </div>
+          <div className="meter" role="img" aria-label={`Perfil completo al ${completion}%`}>
+            <span style={{ width: `${completion}%` }} />
           </div>
         </section>
 
         {loading ? (
-          <div className="soft-text inline-flex items-center gap-2"><span className="loader" />Cargando perfil...</div>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+            <Skeleton className="h-96 lg:col-span-2" />
+            <Skeleton className="h-96" />
+          </div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2 space-y-6">
-            <form onSubmit={saveProfile} className="panel p-6 space-y-4">
-              <h2 className="text-2xl font-semibold text-slate-900 dark:text-slate-100 inline-flex items-center gap-2"><BadgeCheck size={20} />Datos personales</h2>
-              <div className="grid grid-cols-1 md:grid-cols-[160px_1fr] gap-4 items-start">
-                <div className="panel p-3 stack-gap items-center text-center">
-                  <div className="w-28 h-28 rounded-full overflow-hidden border border-slate-400/30 dark:border-slate-700 bg-slate-200 dark:bg-slate-800 mx-auto">
-                    {form.profileImageUrl ? (
-                      <img src={form.profileImageUrl} alt="Foto de perfil" className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center text-slate-500">
-                        <UserCircle2 size={44} />
-                      </div>
-                    )}
-                  </div>
-                  <div className="text-xs soft-text">Pega una URL de imagen para tu foto de perfil.</div>
-                </div>
-                <div className="stack-gap">
-                  <label className="field-label inline-flex items-center gap-1"><ImagePlus size={14} />Foto de perfil</label>
-                  <input
-                    value={form.profileImageUrl}
-                    onChange={(e) => setForm((s) => ({ ...s, profileImageUrl: e.target.value }))}
-                    className="field"
-                    placeholder="https://..."
-                  />
-                </div>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="field-label">Nombre</label>
-                  <input
-                    value={form.firstName}
-                    onChange={(e) => setForm((s) => ({ ...s, firstName: e.target.value }))}
-                    className="field"
-                  />
-                </div>
-                <div>
-                  <label className="field-label">Apellido</label>
-                  <input
-                    value={form.lastName}
-                    onChange={(e) => setForm((s) => ({ ...s, lastName: e.target.value }))}
-                    className="field"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="field-label">Musculo favorito</label>
-                <input
-                  list="muscle-pref-options"
-                  value={form.favoriteMuscle}
-                  onChange={(e) => setForm((s) => ({ ...s, favoriteMuscle: e.target.value }))}
-                  className="field"
-                />
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {['Pecho', 'Espalda', 'Pierna', 'Core'].map((m) => (
-                    <button key={m} type="button" className="btn-soft text-xs" onClick={() => setForm((s) => ({ ...s, favoriteMuscle: m }))}>{m}</button>
-                  ))}
-                </div>
-                <datalist id="muscle-pref-options">
-                  {['Pecho', 'Espalda', 'Hombros', 'Biceps', 'Triceps', 'Pierna', 'Core'].map((item) => (
-                    <option key={item} value={item} />
-                  ))}
-                </datalist>
-              </div>
-              <div>
-                <label className="field-label">Bio</label>
-                <textarea
-                  value={form.bio}
-                  onChange={(e) => setForm((s) => ({ ...s, bio: e.target.value }))}
-                  className="field min-h-24"
-                />
-                <div className="soft-text text-xs mt-1">{form.bio.length}/240 caracteres</div>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="btn-primary disabled:opacity-60"
-                >
-                  {saving ? 'Guardando...' : 'Guardar perfil'}
-                </button>
-                <button type="button" className="btn-soft" onClick={resetForm}>Revertir</button>
-              </div>
-            </form>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+            <div className="space-y-6 lg:col-span-2">
+              <form onSubmit={saveProfile} className="panel space-y-4 p-6">
+                <h2 className="inline-flex items-center gap-2 text-xl font-semibold">
+                  <BadgeCheck size={19} />
+                  Datos personales
+                </h2>
 
-            <section className="panel p-6 stack-gap">
-              <h2 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">Galería de progreso</h2>
-              <form onSubmit={addPhoto} className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <input className="field" placeholder="URL de imagen" value={photoForm.imageUrl} onChange={(e) => setPhotoForm((s) => ({ ...s, imageUrl: e.target.value }))} required />
-                <input className="field" placeholder="Descripción (opcional)" value={photoForm.caption} onChange={(e) => setPhotoForm((s) => ({ ...s, caption: e.target.value }))} />
-                <div className="flex gap-2">
-                  <input type="date" className="field" value={photoForm.takenAt} onChange={(e) => setPhotoForm((s) => ({ ...s, takenAt: e.target.value }))} />
-                  <button className="btn-primary" type="submit">Agregar</button>
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-[150px_1fr]">
+                  <div className="panel-sunken flex flex-col items-center gap-2 p-3 text-center">
+                    <div
+                      className="h-24 w-24 overflow-hidden rounded-full"
+                      style={{ border: '1px solid var(--line-strong)', background: 'var(--bg-elev)' }}
+                    >
+                      {form.profileImageUrl ? (
+                        <img
+                          src={form.profileImageUrl}
+                          alt="Vista previa de tu foto de perfil"
+                          className="h-full w-full object-cover"
+                          onError={(event) => {
+                            event.currentTarget.style.display = 'none'
+                          }}
+                        />
+                      ) : (
+                        <div className="faint-text flex h-full w-full items-center justify-center">
+                          <UserCircle2 size={42} />
+                        </div>
+                      )}
+                    </div>
+                    <p className="faint-text text-xs">Vista previa</p>
+                  </div>
+
+                  <div>
+                    <label className="field-label inline-flex items-center gap-1" htmlFor="avatar">
+                      <ImagePlus size={13} />
+                      URL de tu foto de perfil
+                    </label>
+                    <input
+                      id="avatar"
+                      className="field"
+                      type="url"
+                      placeholder="https://..."
+                      value={form.profileImageUrl}
+                      onChange={(event) => setForm((state) => ({ ...state, profileImageUrl: event.target.value }))}
+                    />
+                    <p className="faint-text mt-1 text-xs">
+                      Pega el enlace de una imagen alojada en internet (debe empezar por https://).
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <div>
+                    <label className="field-label" htmlFor="firstName">
+                      Nombre
+                    </label>
+                    <input
+                      id="firstName"
+                      className="field"
+                      value={form.firstName}
+                      onChange={(event) => setForm((state) => ({ ...state, firstName: event.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="field-label" htmlFor="lastName">
+                      Apellido
+                    </label>
+                    <input
+                      id="lastName"
+                      className="field"
+                      value={form.lastName}
+                      onChange={(event) => setForm((state) => ({ ...state, lastName: event.target.value }))}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="field-label" htmlFor="favoriteMuscle">
+                    Músculo favorito
+                  </label>
+                  <input
+                    id="favoriteMuscle"
+                    list="muscle-options"
+                    className="field"
+                    value={form.favoriteMuscle}
+                    onChange={(event) => setForm((state) => ({ ...state, favoriteMuscle: event.target.value }))}
+                  />
+                  <datalist id="muscle-options">
+                    {MUSCLE_OPTIONS.map((item) => (
+                      <option key={item} value={item} />
+                    ))}
+                  </datalist>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {MUSCLE_OPTIONS.slice(0, 6).map((muscle) => (
+                      <button
+                        key={muscle}
+                        type="button"
+                        className={`btn-soft btn-xs ${form.favoriteMuscle === muscle ? 'is-active' : ''}`}
+                        onClick={() => setForm((state) => ({ ...state, favoriteMuscle: muscle }))}
+                      >
+                        {muscle}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="field-label" htmlFor="bio">
+                    Bio
+                  </label>
+                  <textarea
+                    id="bio"
+                    className="field min-h-24"
+                    maxLength={BIO_MAX}
+                    placeholder="Tus objetivos, tu deporte, lo que te mueve..."
+                    value={form.bio}
+                    onChange={(event) => setForm((state) => ({ ...state, bio: event.target.value }))}
+                  />
+                  <div
+                    className="mt-1 text-right text-xs"
+                    style={{ color: form.bio.length > BIO_MAX - 20 ? 'var(--warning)' : 'var(--text-faint)' }}
+                  >
+                    {form.bio.length}/{BIO_MAX}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <button type="submit" disabled={saving} className="btn-primary">
+                    {saving ? (
+                      <>
+                        <span className="loader" />
+                        Guardando...
+                      </>
+                    ) : (
+                      'Guardar perfil'
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-soft"
+                    onClick={() => profile && fillForm(profile)}
+                    disabled={saving}
+                  >
+                    Descartar cambios
+                  </button>
                 </div>
               </form>
 
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                {(profile?.photos || []).map((photo) => (
-                  <article key={photo.id} className="border border-slate-400/30 dark:border-slate-700 rounded overflow-hidden bg-white/50 dark:bg-slate-900/35">
-                    <img src={photo.image_url} alt={photo.caption || 'Progreso'} className="w-full h-32 object-cover" />
-                    <div className="p-2 stack-gap">
-                      <div className="text-xs soft-text">{photo.caption || 'Sin descripción'}</div>
-                      <div className="text-xs soft-text">{photo.taken_at ? String(photo.taken_at).slice(0, 10) : 'Sin fecha'}</div>
-                      <button type="button" className="btn-soft text-xs" onClick={() => removePhoto(photo.id)}>Eliminar</button>
-                    </div>
-                  </article>
-                ))}
-                {(profile?.photos || []).length === 0 && <div className="empty-state col-span-2 md:col-span-3">Aún no tienes fotos en tu galería.</div>}
-              </div>
-            </section>
+              <section className="panel space-y-4 p-6">
+                <div>
+                  <h2 className="inline-flex items-center gap-2 text-xl font-semibold">
+                    <Images size={19} />
+                    Galería de progreso
+                  </h2>
+                  <p className="section-subtitle">Guarda fotos para ver tu evolución a lo largo del tiempo.</p>
+                </div>
+
+                <form onSubmit={addPhoto} className="grid grid-cols-1 gap-3 md:grid-cols-[2fr_1.5fr_auto]">
+                  <input
+                    className="field"
+                    type="url"
+                    placeholder="URL de la imagen"
+                    value={photoForm.imageUrl}
+                    onChange={(event) => setPhotoForm((state) => ({ ...state, imageUrl: event.target.value }))}
+                    required
+                    aria-label="URL de la imagen"
+                  />
+                  <input
+                    className="field"
+                    placeholder="Descripción (opcional)"
+                    value={photoForm.caption}
+                    onChange={(event) => setPhotoForm((state) => ({ ...state, caption: event.target.value }))}
+                    aria-label="Descripción de la foto"
+                  />
+                  <div className="flex gap-2">
+                    <input
+                      type="date"
+                      className="field"
+                      value={photoForm.takenAt}
+                      onChange={(event) => setPhotoForm((state) => ({ ...state, takenAt: event.target.value }))}
+                      aria-label="Fecha de la foto"
+                    />
+                    <button className="btn-primary" type="submit" disabled={addingPhoto}>
+                      Añadir
+                    </button>
+                  </div>
+                </form>
+
+                {profile && profile.photos.length > 0 ? (
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    {profile.photos.map((photo) => (
+                      <figure key={photo.id} className="list-row overflow-hidden !p-0">
+                        <img
+                          src={photo.image_url}
+                          alt={photo.caption || 'Foto de progreso'}
+                          className="h-32 w-full object-cover"
+                          loading="lazy"
+                        />
+                        <figcaption className="space-y-1.5 p-2">
+                          <div className="soft-text truncate text-xs">{photo.caption || 'Sin descripción'}</div>
+                          <div className="faint-text text-xs">
+                            {photo.taken_at ? String(photo.taken_at).slice(0, 10) : 'Sin fecha'}
+                          </div>
+                          <button type="button" className="btn-danger btn-xs w-full" onClick={() => removePhoto(photo.id)}>
+                            <Trash2 size={12} />
+                            Eliminar
+                          </button>
+                        </figcaption>
+                      </figure>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-state">Todavía no has subido ninguna foto de progreso.</div>
+                )}
+              </section>
             </div>
 
-            <div className="panel p-6 space-y-4">
-              <h2 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">Resumen</h2>
+            <aside className="panel h-fit space-y-4 p-6 lg:sticky lg:top-20">
+              <h2 className="text-xl font-semibold">Resumen</h2>
+
               <div>
-                <div className="text-sm soft-text inline-flex items-center gap-1"><UserRound size={13} />Usuario</div>
-                <div className="font-semibold text-slate-900 dark:text-slate-100">{profile?.user.username}</div>
+                <div className="soft-text inline-flex items-center gap-1.5 text-sm">
+                  <UserRound size={13} />
+                  Usuario
+                </div>
+                <div className="font-semibold">{profile?.user.username}</div>
               </div>
+
               <div>
-                <div className="text-sm soft-text inline-flex items-center gap-1"><Mail size={13} />Email</div>
-                <div className="font-semibold break-all text-slate-900 dark:text-slate-100">{profile?.user.email}</div>
+                <div className="soft-text inline-flex items-center gap-1.5 text-sm">
+                  <Mail size={13} />
+                  Email
+                </div>
+                <div className="break-all font-semibold">{profile?.user.email}</div>
+                <p className="faint-text mt-0.5 text-xs">Sólo tú ves tu email; nunca aparece en tu perfil público.</p>
               </div>
-              <div>
-                <div className="text-sm soft-text inline-flex items-center gap-1"><Dumbbell size={13} />Rutinas activas</div>
-                <div className="font-semibold text-slate-900 dark:text-slate-100">{profile?.routines.length || 0}</div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="panel-sunken p-3">
+                  <div className="soft-text inline-flex items-center gap-1 text-xs">
+                    <Dumbbell size={12} />
+                    Rutinas
+                  </div>
+                  <div className="text-2xl font-bold tabular-nums">{profile?.routines.length ?? 0}</div>
+                </div>
+                <div className="panel-sunken p-3">
+                  <div className="soft-text text-xs">Grupos</div>
+                  <div className="text-2xl font-bold tabular-nums">{profile?.groups.length ?? 0}</div>
+                </div>
               </div>
-              <div>
-                <div className="text-sm soft-text">Grupos</div>
-                <div className="font-semibold text-slate-900 dark:text-slate-100">{profile?.groups.length || 0}</div>
-              </div>
-              <div>
-                <div className="text-sm soft-text mb-1">Rutinas</div>
-                <ul className="text-sm space-y-1">
-                  {(profile?.routines || []).slice(0, 5).map((r) => (
-                    <li key={r.id} className="text-slate-800 dark:text-slate-200">• {r.name}</li>
-                  ))}
-                </ul>
-              </div>
-              <div>
-                <div className="text-sm soft-text mb-1">Grupos</div>
-                <ul className="text-sm space-y-1">
-                  {(profile?.groups || []).slice(0, 5).map((g) => (
-                    <li key={g.id} className="text-slate-800 dark:text-slate-200">
-                      • {g.name}{g.routineName ? ` · ${g.routineName}` : ''}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
+
+              {profile && profile.routines.length > 0 && (
+                <div>
+                  <div className="soft-text mb-1.5 text-sm font-semibold">Tus rutinas</div>
+                  <ul className="space-y-1 text-sm">
+                    {profile.routines.slice(0, 6).map((routine) => (
+                      <li key={routine.id} className="flex items-center justify-between gap-2">
+                        <span className="truncate">{routine.name}</span>
+                        <span className="tiny-badge shrink-0">{routine.is_public ? 'Pública' : 'Privada'}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {profile && profile.groups.length > 0 && (
+                <div>
+                  <div className="soft-text mb-1.5 text-sm font-semibold">Tus grupos</div>
+                  <ul className="space-y-1 text-sm">
+                    {profile.groups.slice(0, 6).map((group) => (
+                      // routine_name viene en snake_case del backend: antes se leía
+                      // como routineName y nunca se mostraba nada.
+                      <li key={group.id} className="truncate">
+                        {group.name}
+                        {group.routine_name ? ` · ${group.routine_name}` : ''}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </aside>
           </div>
         )}
       </main>
