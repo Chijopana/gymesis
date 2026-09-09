@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
-import { ArrowDownAZ, Copy, RefreshCw, Search, UserCheck, UserPlus2, Users, XCircle } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { ArrowDownAZ, RefreshCw, Search, UserCheck, UserPlus2, Users, X } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import PageHeader from '../components/PageHeader'
-import { useIsLargeScreen } from '../hooks/useResponsive'
-import { friendService, userService } from '../services/api'
+import { SkeletonList } from '../components/Skeleton'
+import { useConfirm } from '../components/ConfirmDialog'
+import { friendService, getErrorMessage, userService } from '../services/api'
 import { clearCacheByPrefix, getCachedOrFetch } from '../utils/cache'
 import { emitFeedback } from '../utils/feedback'
 
@@ -12,15 +13,52 @@ type Friendship = {
   id: string
   friend_id: string
   friend_username: string
+  friend_image_url?: string | null
   status: 'pending' | 'accepted'
   direction: 'incoming' | 'outgoing'
 }
 
-type SearchUser = { id: string; username: string }
+type SearchUser = {
+  id: string
+  username: string
+  first_name?: string | null
+  profile_image_url?: string | null
+  friendship_status: 'none' | 'pending' | 'accepted'
+}
+
+type StatusFilter = 'all' | 'accepted' | 'incoming' | 'outgoing'
+
+const FILTERS: Array<{ value: StatusFilter; label: string }> = [
+  { value: 'all', label: 'Todas' },
+  { value: 'accepted', label: 'Amigos' },
+  { value: 'incoming', label: 'Recibidas' },
+  { value: 'outgoing', label: 'Enviadas' },
+]
+
+function Avatar({ url, name, size = 40 }: { url?: string | null; name: string; size?: number }) {
+  return (
+    <div
+      className="shrink-0 overflow-hidden rounded-full"
+      style={{ width: size, height: size, border: '1px solid var(--line-strong)', background: 'var(--bg-elev)' }}
+    >
+      {url ? (
+        <img src={url} alt="" className="h-full w-full object-cover" loading="lazy" />
+      ) : (
+        <div
+          className="flex h-full w-full items-center justify-center text-xs font-bold"
+          style={{ color: 'var(--brand-strong)' }}
+        >
+          {name.slice(0, 2).toUpperCase()}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export default function Friends() {
   const navigate = useNavigate()
-  const isLargeScreen = useIsLargeScreen()
+  const { confirm, confirmDialog } = useConfirm()
+
   const [friendships, setFriendships] = useState<Friendship[]>([])
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState<SearchUser[]>([])
@@ -28,300 +66,356 @@ export default function Friends() {
   const [loadingFriends, setLoadingFriends] = useState(true)
   const [sortAsc, setSortAsc] = useState(true)
   const [relationQuery, setRelationQuery] = useState('')
-  const [bulkRunning, setBulkRunning] = useState(false)
+  const [busyId, setBusyId] = useState('')
   const [error, setError] = useState('')
-  const [status, setStatus] = useState('all')
-  const [statusMessage, setStatusMessage] = useState('')
-  const [mobileView, setMobileView] = useState<'search' | 'relations'>('search')
+  const [status, setStatus] = useState<StatusFilter>('all')
 
-  const loadFriends = async () => {
+  const loadFriends = useCallback(async (forceFresh = false) => {
     try {
       setLoadingFriends(true)
       setError('')
+      if (forceFresh) clearCacheByPrefix('gymesis:friends:list')
+
       const result = await getCachedOrFetch(
         'gymesis:friends:list',
-        async () => friendService.getFriends().then((response) => response.data.friendships || []),
-        { ttlMs: 30_000, version: 2 }
+        () => friendService.getFriends().then((response) => response.data.friendships || []),
+        { ttlMs: 30_000, version: 3 }
       )
       setFriendships(result.data)
       if (result.stale) {
-        emitFeedback({ kind: 'warning', title: 'Mostrando amigos recientes', message: 'Se usó caché local por conexión inestable.' })
+        emitFeedback({
+          kind: 'warning',
+          title: 'Datos guardados en el dispositivo',
+          message: 'No hemos podido contactar con el servidor.',
+        })
       }
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'No se pudieron cargar amigos')
-      emitFeedback({ kind: 'error', title: 'No se pudieron cargar amigos', message: err.response?.data?.error || 'Revisa la conexión.' })
+    } catch (err) {
+      setError(getErrorMessage(err, 'No se han podido cargar tus amigos.'))
     } finally {
       setLoadingFriends(false)
     }
-  }
+  }, [])
 
   useEffect(() => {
     loadFriends()
-  }, [])
+  }, [loadFriends])
 
-  const searchUsers = async () => {
-    if (search.trim().length < 2) {
-      setSearchResults([])
-      return
-    }
-    try {
-      setSearching(true)
-      const query = search.trim().toLowerCase()
-      const result = await getCachedOrFetch(
-        `gymesis:friends:search:${query}`,
-        async () => userService.searchUsers(query).then((response) => response.data.users || []),
-        { ttlMs: 120_000, version: 2 }
-      )
-      setSearchResults(result.data)
-      if (result.stale) {
-        emitFeedback({ kind: 'warning', title: 'Resultados recientes', message: 'La búsqueda se resolvió desde caché local.' })
-      }
-    } catch {
-      setSearchResults([])
-    } finally {
-      setSearching(false)
-    }
-  }
-
+  // Búsqueda con retardo: no se dispara una petición por cada tecla.
   useEffect(() => {
-    if (search.trim().length < 2) {
+    const query = search.trim()
+    if (query.length < 2) {
       setSearchResults([])
+      setSearching(false)
       return
     }
-    const timer = window.setTimeout(() => {
-      searchUsers()
-    }, 260)
-    return () => window.clearTimeout(timer)
+
+    setSearching(true)
+    const controller = new AbortController()
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await userService.searchUsers(query)
+        if (!controller.signal.aborted) setSearchResults(response.data.users || [])
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setSearchResults([])
+          emitFeedback({ kind: 'error', title: 'Búsqueda fallida', message: getErrorMessage(err) })
+        }
+      } finally {
+        if (!controller.signal.aborted) setSearching(false)
+      }
+    }, 300)
+
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+    }
   }, [search])
 
-  useEffect(() => {
-    if (!statusMessage) return
-    const timer = window.setTimeout(() => setStatusMessage(''), 2500)
-    return () => window.clearTimeout(timer)
-  }, [statusMessage])
-
-  const sendRequest = async (userId: string) => {
+  /** Envuelve cada acción para que un fallo nunca quede en silencio. */
+  const runAction = async (id: string, action: () => Promise<unknown>, success: string) => {
     try {
+      setBusyId(id)
+      await action()
       clearCacheByPrefix('gymesis:friends:')
-      await friendService.sendRequest(userId)
-      await loadFriends()
-      setStatusMessage('Solicitud enviada')
-      emitFeedback({ kind: 'success', title: 'Solicitud enviada', message: 'Se creó la solicitud de amistad.' })
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'No se pudo enviar solicitud')
-      emitFeedback({ kind: 'error', title: 'No se pudo enviar la solicitud', message: err.response?.data?.error || 'Inténtalo de nuevo.' })
-    }
-  }
-
-  const accept = async (requestId: string) => {
-    clearCacheByPrefix('gymesis:friends:')
-    await friendService.acceptRequest(requestId)
-    await loadFriends()
-    setStatusMessage('Solicitud aceptada')
-    emitFeedback({ kind: 'success', title: 'Solicitud aceptada', message: 'Ahora sois amigos.' })
-  }
-
-  const reject = async (requestId: string) => {
-    clearCacheByPrefix('gymesis:friends:')
-    await friendService.rejectRequest(requestId)
-    await loadFriends()
-    setStatusMessage('Solicitud rechazada')
-    emitFeedback({ kind: 'info', title: 'Solicitud rechazada', message: 'La petición fue descartada.' })
-  }
-
-  const remove = async (friendId: string) => {
-    clearCacheByPrefix('gymesis:friends:')
-    await friendService.removeFriend(friendId)
-    await loadFriends()
-    setStatusMessage('Amigo eliminado')
-    emitFeedback({ kind: 'warning', title: 'Amigo eliminado', message: 'Se retiró la relación seleccionada.' })
-  }
-
-  const filtered = friendships.filter((f) => {
-    if (status === 'all') return true
-    if (status === 'accepted') return f.status === 'accepted'
-    if (status === 'incoming') return f.status === 'pending' && f.direction === 'incoming'
-    if (status === 'outgoing') return f.status === 'pending' && f.direction === 'outgoing'
-    return true
-  }).filter((f) => f.friend_username.toLowerCase().includes(relationQuery.toLowerCase())).sort((a, b) => {
-    const left = a.friend_username.toLowerCase()
-    const right = b.friend_username.toLowerCase()
-    return sortAsc ? left.localeCompare(right) : right.localeCompare(left)
-  })
-
-  const stats = {
-    accepted: friendships.filter((f) => f.status === 'accepted').length,
-    incoming: friendships.filter((f) => f.status === 'pending' && f.direction === 'incoming').length,
-    outgoing: friendships.filter((f) => f.status === 'pending' && f.direction === 'outgoing').length,
-  }
-
-  const copyId = async (id: string) => {
-    try {
-      await navigator.clipboard.writeText(id)
-      setStatusMessage('ID copiado al portapapeles')
-      emitFeedback({ kind: 'info', title: 'ID copiado', message: 'El identificador quedó en el portapapeles.' })
-    } catch {
-      setStatusMessage('No se pudo copiar el ID')
-    }
-  }
-
-  const copyUsername = async (username: string) => {
-    try {
-      await navigator.clipboard.writeText(username)
-      setStatusMessage('Username copiado')
-      emitFeedback({ kind: 'info', title: 'Username copiado', message: 'El usuario quedó en el portapapeles.' })
-    } catch {
-      setStatusMessage('No se pudo copiar username')
-    }
-  }
-
-  const acceptAllIncoming = async () => {
-    const incoming = friendships.filter((f) => f.status === 'pending' && f.direction === 'incoming')
-    if (incoming.length === 0) return
-    setBulkRunning(true)
-    try {
-      clearCacheByPrefix('gymesis:friends:')
-      for (const item of incoming) {
-        await friendService.acceptRequest(item.id)
-      }
-      await loadFriends()
-      setStatusMessage('Se aceptaron todas las solicitudes recibidas')
-      emitFeedback({ kind: 'success', title: 'Solicitudes recibidas aceptadas', message: 'Se procesaron todas las solicitudes visibles.' })
+      clearCacheByPrefix('gymesis:dashboard:')
+      await loadFriends(true)
+      emitFeedback({ kind: 'success', title: success })
+    } catch (err) {
+      const message = getErrorMessage(err)
+      setError(message)
+      emitFeedback({ kind: 'error', title: 'No ha sido posible', message })
     } finally {
-      setBulkRunning(false)
+      setBusyId('')
     }
   }
 
-  const rejectAllOutgoing = async () => {
-    const outgoing = friendships.filter((f) => f.status === 'pending' && f.direction === 'outgoing')
-    if (outgoing.length === 0) return
-    setBulkRunning(true)
-    try {
-      clearCacheByPrefix('gymesis:friends:')
-      for (const item of outgoing) {
-        await friendService.rejectRequest(item.id)
-      }
-      await loadFriends()
-      setStatusMessage('Se cancelaron las solicitudes enviadas visibles')
-      emitFeedback({ kind: 'info', title: 'Solicitudes enviadas canceladas', message: 'Se descartaron las solicitudes visibles.' })
-    } finally {
-      setBulkRunning(false)
-    }
+  const sendRequest = (userId: string) =>
+    runAction(userId, () => friendService.sendRequest(userId), 'Solicitud enviada')
+
+  const accept = (requestId: string) =>
+    runAction(requestId, () => friendService.acceptRequest(requestId), 'Solicitud aceptada')
+
+  const reject = (requestId: string) =>
+    runAction(requestId, () => friendService.rejectRequest(requestId), 'Solicitud rechazada')
+
+  const remove = async (friend: Friendship) => {
+    const ok = await confirm({
+      title: `Eliminar a ${friend.friend_username}`,
+      message: 'Dejaréis de ser amigos. Podréis volver a enviaros una solicitud más adelante.',
+      confirmLabel: 'Eliminar amistad',
+      tone: 'danger',
+    })
+    if (!ok) return
+    runAction(friend.friend_id, () => friendService.removeFriend(friend.friend_id), 'Amistad eliminada')
   }
+
+  const stats = useMemo(
+    () => ({
+      accepted: friendships.filter((f) => f.status === 'accepted').length,
+      incoming: friendships.filter((f) => f.status === 'pending' && f.direction === 'incoming').length,
+      outgoing: friendships.filter((f) => f.status === 'pending' && f.direction === 'outgoing').length,
+    }),
+    [friendships]
+  )
+
+  const filtered = useMemo(
+    () =>
+      friendships
+        .filter((f) => {
+          if (status === 'accepted') return f.status === 'accepted'
+          if (status === 'incoming') return f.status === 'pending' && f.direction === 'incoming'
+          if (status === 'outgoing') return f.status === 'pending' && f.direction === 'outgoing'
+          return true
+        })
+        .filter((f) => f.friend_username.toLowerCase().includes(relationQuery.trim().toLowerCase()))
+        .sort((a, b) => {
+          const left = a.friend_username.toLowerCase()
+          const right = b.friend_username.toLowerCase()
+          return sortAsc ? left.localeCompare(right) : right.localeCompare(left)
+        }),
+    [friendships, status, relationQuery, sortAsc]
+  )
 
   return (
     <>
       <Navbar />
+      {confirmDialog}
       <main id="main-content" className="page-shell">
         <PageHeader
           icon={<Users className="title-icon" />}
           title="Equipo y rivales"
-          subtitle="Gestiona solicitudes, amistades activas y contactos para retos de rutina."
+          subtitle="Busca atletas, gestiona solicitudes y mantén tu círculo de entrenamiento."
+          actions={
+            <button className="btn-soft btn-sm" onClick={() => loadFriends(true)} disabled={loadingFriends}>
+              <RefreshCw size={14} className={loadingFriends ? 'animate-spin' : ''} />
+              Actualizar
+            </button>
+          }
+          meta={
+            <>
+              <span className="tiny-badge">Amigos: {stats.accepted}</span>
+              {stats.incoming > 0 && <span className="tiny-badge tiny-badge-warning">Recibidas: {stats.incoming}</span>}
+              {stats.outgoing > 0 && <span className="tiny-badge">Enviadas: {stats.outgoing}</span>}
+            </>
+          }
         />
-        {error && <div className="mb-4 status-error">{error}</div>}
-        {statusMessage && <div className="mb-4 status-success">{statusMessage}</div>}
-        <div className="sr-only" aria-live="polite">{statusMessage}</div>
 
-        <section className="panel p-4 mb-4 stack-gap">
-          <div className="flex flex-wrap gap-2">
-            <span className="tiny-badge">Amigos: {stats.accepted}</span>
-            <span className="tiny-badge">Recibidas: {stats.incoming}</span>
-            <span className="tiny-badge">Enviadas: {stats.outgoing}</span>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button className="btn-soft text-sm inline-flex items-center gap-1" onClick={loadFriends}><RefreshCw size={14} />Refrescar</button>
-            <button disabled={bulkRunning || stats.incoming === 0} className="btn-soft text-sm" onClick={acceptAllIncoming}>Aceptar recibidas</button>
-            <button disabled={bulkRunning || stats.outgoing === 0} className="btn-soft text-sm" onClick={rejectAllOutgoing}>Cancelar enviadas</button>
-          </div>
-        </section>
-
-        {!isLargeScreen && (
-          <div className="mobile-tabs mb-4">
-            <button className={`mobile-tab ${mobileView === 'search' ? 'active' : ''}`} onClick={() => setMobileView('search')}>Buscar</button>
-            <button className={`mobile-tab ${mobileView === 'relations' ? 'active' : ''}`} onClick={() => setMobileView('relations')}>Relaciones</button>
+        {error && (
+          <div role="alert" className="status-error mb-4">
+            {error}
           </div>
         )}
 
-        {(isLargeScreen || mobileView === 'search') && (
-        <section className="panel p-5 mb-6 stack-gap">
-          <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100 inline-flex items-center gap-2"><Search size={18} />Buscar usuarios</h2>
-          <div className="flex gap-2">
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault()
-                  searchUsers()
-                }
-              }}
-              placeholder="Buscar por username..."
-              className="field"
-            />
-            <button onClick={searchUsers} className="btn-primary inline-flex items-center gap-1"><Search size={14} />Buscar</button>
-            <button onClick={() => { setSearch(''); setSearchResults([]) }} className="btn-soft inline-flex items-center gap-1"><XCircle size={14} />Limpiar</button>
-          </div>
-          {searching && <div className="soft-text mt-2 inline-flex items-center gap-2"><span className="loader" />Buscando...</div>}
-          <div className="mt-4 space-y-2">
-            {searchResults.map((u) => (
-              <div key={u.id} className="flex items-center justify-between border border-slate-400/30 dark:border-slate-700 rounded px-3 py-2 bg-white/40 dark:bg-slate-900/35">
-                <div>
-                  <div className="font-semibold text-slate-900 dark:text-slate-100">{u.username}</div>
-                  <div className="text-xs soft-text">ID: {u.id}</div>
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={() => navigate(`/users/${u.id}`)} className="btn-soft text-sm">Ver perfil</button>
-                  <button onClick={() => copyId(u.id)} className="btn-soft text-sm inline-flex items-center gap-1"><Copy size={14} />Copiar ID</button>
-                  <button onClick={() => sendRequest(u.id)} className="btn-primary text-sm inline-flex items-center gap-1"><UserPlus2 size={14} />Enviar solicitud</button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-        )}
-
-        {(isLargeScreen || mobileView === 'relations') && (
-        <section className="panel p-5 stack-gap">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100 inline-flex items-center gap-2"><UserCheck size={18} />Relaciones</h2>
-            <div className="flex gap-2 items-center">
-              <input className="field max-w-xs" value={relationQuery} onChange={(e) => setRelationQuery(e.target.value)} placeholder="Filtrar por nombre" />
-              <select value={status} onChange={(e) => setStatus(e.target.value)} className="field max-w-xs">
-                <option value="all">Todas</option>
-                <option value="accepted">Solo amigos</option>
-                <option value="incoming">Pendientes recibidas</option>
-                <option value="outgoing">Pendientes enviadas</option>
-              </select>
-              <button className="btn-soft inline-flex items-center gap-1" onClick={() => setSortAsc((v) => !v)}><ArrowDownAZ size={14} />{sortAsc ? 'A-Z' : 'Z-A'}</button>
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <section className="panel space-y-4 p-5">
+            <div>
+              <h2 className="inline-flex items-center gap-2 text-xl font-semibold">
+                <Search size={18} />
+                Buscar atletas
+              </h2>
+              <p className="section-subtitle">Escribe al menos 2 caracteres de su nombre de usuario.</p>
             </div>
-          </div>
-          {loadingFriends && <div className="soft-text mb-3 inline-flex items-center gap-2"><span className="loader" />Cargando relaciones...</div>}
-          <div className="space-y-3">
-            {filtered.map((f) => (
-              <div key={f.id} className="border border-slate-400/30 dark:border-slate-700 rounded p-3 flex items-center justify-between bg-white/40 dark:bg-slate-900/35">
-                <div>
-                  <div className="font-semibold text-slate-900 dark:text-slate-100">{f.friend_username}</div>
-                  <div className="text-sm soft-text">Estado: {f.status} ({f.direction})</div>
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={() => navigate(`/users/${f.friend_id}`)} className="btn-soft text-sm">Ver perfil</button>
-                  <button onClick={() => copyUsername(f.friend_username)} className="btn-soft text-sm">Copiar user</button>
-                  {f.status === 'pending' && f.direction === 'incoming' && (
-                    <>
-                      <button onClick={() => accept(f.id)} className="bg-emerald-600 text-white px-3 py-1 rounded text-sm">Aceptar</button>
-                      <button onClick={() => reject(f.id)} className="btn-soft text-sm">Rechazar</button>
-                    </>
-                  )}
-                  {f.status === 'accepted' && (
-                    <button onClick={() => remove(f.friend_id)} className="bg-red-600 text-white px-3 py-1 rounded text-sm">Eliminar</button>
-                  )}
-                </div>
+
+            <div className="relative">
+              <Search size={15} className="faint-text absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="nombre_de_usuario"
+                className="field pl-8 pr-9"
+                aria-label="Buscar usuarios por nombre"
+              />
+              {search && (
+                <button
+                  type="button"
+                  className="btn-ghost absolute right-1 top-1/2 -translate-y-1/2 p-1.5"
+                  onClick={() => setSearch('')}
+                  aria-label="Limpiar búsqueda"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+
+            {searching && (
+              <div className="soft-text flex items-center gap-2 text-sm">
+                <span className="loader" />
+                Buscando...
               </div>
-            ))}
-            {filtered.length === 0 && <div className="soft-text">No hay elementos en este filtro.</div>}
-          </div>
-        </section>
-        )}
+            )}
+
+            {!searching && search.trim().length >= 2 && searchResults.length === 0 && (
+              <div className="empty-state">No hay ningún usuario con ese nombre.</div>
+            )}
+
+            <div className="space-y-2">
+              {searchResults.map((user) => (
+                <div key={user.id} className="list-row flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                    onClick={() => navigate(`/users/${user.id}`)}
+                  >
+                    <Avatar url={user.profile_image_url} name={user.username} />
+                    <div className="min-w-0">
+                      <div className="truncate font-semibold">{user.username}</div>
+                      {user.first_name && <div className="soft-text truncate text-xs">{user.first_name}</div>}
+                    </div>
+                  </button>
+
+                  {user.friendship_status === 'accepted' ? (
+                    <span className="tiny-badge tiny-badge-success shrink-0">
+                      <UserCheck size={12} />
+                      Amigos
+                    </span>
+                  ) : user.friendship_status === 'pending' ? (
+                    <span className="tiny-badge tiny-badge-warning shrink-0">Pendiente</span>
+                  ) : (
+                    <button
+                      onClick={() => sendRequest(user.id)}
+                      className="btn-primary btn-sm shrink-0"
+                      disabled={busyId === user.id}
+                    >
+                      <UserPlus2 size={14} />
+                      Añadir
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="panel space-y-4 p-5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="inline-flex items-center gap-2 text-xl font-semibold">
+                <UserCheck size={18} />
+                Tus relaciones
+              </h2>
+              <button
+                className="btn-soft btn-sm"
+                onClick={() => setSortAsc((value) => !value)}
+                title="Cambiar orden alfabético"
+              >
+                <ArrowDownAZ size={14} />
+                {sortAsc ? 'A-Z' : 'Z-A'}
+              </button>
+            </div>
+
+            <div className="mobile-tabs">
+              {FILTERS.map((filter) => (
+                <button
+                  key={filter.value}
+                  type="button"
+                  className={`mobile-tab ${status === filter.value ? 'active' : ''}`}
+                  onClick={() => setStatus(filter.value)}
+                >
+                  {filter.label}
+                </button>
+              ))}
+            </div>
+
+            <input
+              className="field"
+              value={relationQuery}
+              onChange={(event) => setRelationQuery(event.target.value)}
+              placeholder="Filtrar por nombre"
+              aria-label="Filtrar relaciones"
+            />
+
+            {loadingFriends ? (
+              <SkeletonList count={3} />
+            ) : filtered.length === 0 ? (
+              <div className="empty-state">
+                {friendships.length === 0
+                  ? 'Todavía no tienes amigos. Búscalos en el panel de al lado.'
+                  : 'No hay nadie en este filtro.'}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {filtered.map((friend) => (
+                  <div key={friend.id} className="list-row flex flex-wrap items-center justify-between gap-3">
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                      onClick={() => navigate(`/users/${friend.friend_id}`)}
+                    >
+                      <Avatar url={friend.friend_image_url} name={friend.friend_username} />
+                      <div className="min-w-0">
+                        <div className="truncate font-semibold">{friend.friend_username}</div>
+                        <div className="soft-text text-xs">
+                          {friend.status === 'accepted'
+                            ? 'Amigos'
+                            : friend.direction === 'incoming'
+                              ? 'Te ha enviado una solicitud'
+                              : 'Solicitud enviada, esperando respuesta'}
+                        </div>
+                      </div>
+                    </button>
+
+                    <div className="flex shrink-0 gap-2">
+                      {friend.status === 'pending' && friend.direction === 'incoming' && (
+                        <>
+                          <button
+                            onClick={() => accept(friend.id)}
+                            className="btn-primary btn-sm"
+                            disabled={busyId === friend.id}
+                          >
+                            Aceptar
+                          </button>
+                          <button
+                            onClick={() => reject(friend.id)}
+                            className="btn-soft btn-sm"
+                            disabled={busyId === friend.id}
+                          >
+                            Rechazar
+                          </button>
+                        </>
+                      )}
+                      {friend.status === 'pending' && friend.direction === 'outgoing' && (
+                        <button
+                          onClick={() => reject(friend.id)}
+                          className="btn-soft btn-sm"
+                          disabled={busyId === friend.id}
+                        >
+                          Cancelar
+                        </button>
+                      )}
+                      {friend.status === 'accepted' && (
+                        <button
+                          onClick={() => remove(friend)}
+                          className="btn-danger btn-sm"
+                          disabled={busyId === friend.friend_id}
+                        >
+                          Eliminar
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
       </main>
     </>
   )

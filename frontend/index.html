@@ -2,12 +2,32 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GYMESIS - Competitive Gym Tracker</title>
+
+    <title>Gymesis - Entrena con datos, compite con amigos</title>
+    <meta
+      name="description"
+      content="Registra tus entrenamientos, crea rutinas, mide tu progreso y compite con tus amigos y grupos en el gimnasio."
+    />
+    <meta name="color-scheme" content="light dark" />
+    <!-- Color de la barra del navegador en movil, uno por tema. -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f6fa" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#080d16" />
+
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+
+    <!-- Las fuentes se piden desde el CSS; con esto la conexion se abre antes. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Gymesis" />
+    <meta property="og:description" content="Entrena con datos. Compite con amigos." />
   </head>
   <body>
     <div id="root"></div>
+    <noscript>Gymesis necesita JavaScript activado para funcionar.</noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

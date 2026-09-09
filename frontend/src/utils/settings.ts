@@ -1,19 +1,21 @@
-type TrainingSettings = {
+export type DashboardView = 'overview' | 'insights' | 'actions'
+
+export type TrainingSettings = {
   unit: 'kg' | 'lb'
   restTimeSeconds: number
 }
 
-type ReminderSettings = {
+export type ReminderSettings = {
   enabled: boolean
   minutes: number
   message: string
 }
 
-type VisualSettings = {
+export type VisualSettings = {
   compactMode: boolean
   showTips: boolean
   showReadinessScore: boolean
-  defaultDashboardView: 'overview' | 'insights' | 'actions'
+  defaultDashboardView: DashboardView
 }
 
 const TRAINING_SETTINGS_KEY = 'gymesis:training:settings:v1'
@@ -21,40 +23,57 @@ const DASHBOARD_AUTO_REFRESH_KEY = 'gymesis:dashboard:auto-refresh:v1'
 const REMINDER_SETTINGS_KEY = 'gymesis:reminder:settings:v1'
 const VISUAL_SETTINGS_KEY = 'gymesis:visual:settings:v1'
 
-const defaultTrainingSettings: TrainingSettings = {
-  unit: 'kg',
-  restTimeSeconds: 90,
+/** Lee JSON de localStorage tolerando almacenamiento bloqueado o datos corruptos. */
+function readJson<T>(key: string): Partial<T> | null {
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? (JSON.parse(raw) as Partial<T>) : null
+  } catch {
+    return null
+  }
 }
 
-export function getTrainingSettings(): TrainingSettings {
+function writeJson(key: string, value: unknown) {
   try {
-    const raw = localStorage.getItem(TRAINING_SETTINGS_KEY)
-    if (!raw) return defaultTrainingSettings
-    const parsed = JSON.parse(raw) as Partial<TrainingSettings>
-    return {
-      unit: parsed.unit === 'lb' ? 'lb' : 'kg',
-      restTimeSeconds:
-        typeof parsed.restTimeSeconds === 'number' && parsed.restTimeSeconds > 0 && parsed.restTimeSeconds <= 600
-          ? parsed.restTimeSeconds
-          : defaultTrainingSettings.restTimeSeconds,
-    }
+    localStorage.setItem(key, JSON.stringify(value))
   } catch {
-    return defaultTrainingSettings
+    /* modo incógnito o cuota llena: la preferencia sólo dura esta sesión */
+  }
+}
+
+const defaultTrainingSettings: TrainingSettings = { unit: 'kg', restTimeSeconds: 90 }
+
+export function getTrainingSettings(): TrainingSettings {
+  const parsed = readJson<TrainingSettings>(TRAINING_SETTINGS_KEY)
+  if (!parsed) return defaultTrainingSettings
+
+  return {
+    unit: parsed.unit === 'lb' ? 'lb' : 'kg',
+    restTimeSeconds:
+      typeof parsed.restTimeSeconds === 'number' && parsed.restTimeSeconds > 0 && parsed.restTimeSeconds <= 600
+        ? parsed.restTimeSeconds
+        : defaultTrainingSettings.restTimeSeconds,
   }
 }
 
 export function saveTrainingSettings(settings: TrainingSettings) {
-  localStorage.setItem(TRAINING_SETTINGS_KEY, JSON.stringify(settings))
+  writeJson(TRAINING_SETTINGS_KEY, settings)
 }
 
-export function getDashboardAutoRefresh() {
-  const raw = localStorage.getItem(DASHBOARD_AUTO_REFRESH_KEY)
-  if (raw === 'false') return false
-  return true
+export function getDashboardAutoRefresh(): boolean {
+  try {
+    return localStorage.getItem(DASHBOARD_AUTO_REFRESH_KEY) !== 'false'
+  } catch {
+    return true
+  }
 }
 
 export function saveDashboardAutoRefresh(value: boolean) {
-  localStorage.setItem(DASHBOARD_AUTO_REFRESH_KEY, String(value))
+  try {
+    localStorage.setItem(DASHBOARD_AUTO_REFRESH_KEY, String(value))
+  } catch {
+    /* almacenamiento bloqueado */
+  }
 }
 
 const defaultReminderSettings: ReminderSettings = {
@@ -64,25 +83,24 @@ const defaultReminderSettings: ReminderSettings = {
 }
 
 export function getReminderSettings(): ReminderSettings {
-  try {
-    const raw = localStorage.getItem(REMINDER_SETTINGS_KEY)
-    if (!raw) return defaultReminderSettings
-    const parsed = JSON.parse(raw) as Partial<ReminderSettings>
-    return {
-      enabled: Boolean(parsed.enabled),
-      minutes:
-        typeof parsed.minutes === 'number' && parsed.minutes > 0 && parsed.minutes <= 480
-          ? parsed.minutes
-          : defaultReminderSettings.minutes,
-      message: typeof parsed.message === 'string' && parsed.message.trim() ? parsed.message : defaultReminderSettings.message,
-    }
-  } catch {
-    return defaultReminderSettings
+  const parsed = readJson<ReminderSettings>(REMINDER_SETTINGS_KEY)
+  if (!parsed) return defaultReminderSettings
+
+  return {
+    enabled: Boolean(parsed.enabled),
+    minutes:
+      typeof parsed.minutes === 'number' && parsed.minutes > 0 && parsed.minutes <= 480
+        ? parsed.minutes
+        : defaultReminderSettings.minutes,
+    message:
+      typeof parsed.message === 'string' && parsed.message.trim()
+        ? parsed.message.slice(0, 200)
+        : defaultReminderSettings.message,
   }
 }
 
 export function saveReminderSettings(settings: ReminderSettings) {
-  localStorage.setItem(REMINDER_SETTINGS_KEY, JSON.stringify(settings))
+  writeJson(REMINDER_SETTINGS_KEY, settings)
 }
 
 const defaultVisualSettings: VisualSettings = {
@@ -93,22 +111,18 @@ const defaultVisualSettings: VisualSettings = {
 }
 
 export function getVisualSettings(): VisualSettings {
-  try {
-    const raw = localStorage.getItem(VISUAL_SETTINGS_KEY)
-    if (!raw) return defaultVisualSettings
-    const parsed = JSON.parse(raw) as Partial<VisualSettings>
-    const defaultView = parsed.defaultDashboardView
-    return {
-      compactMode: Boolean(parsed.compactMode),
-      showTips: parsed.showTips !== false,
-      showReadinessScore: parsed.showReadinessScore !== false,
-      defaultDashboardView: defaultView === 'insights' || defaultView === 'actions' ? defaultView : 'overview',
-    }
-  } catch {
-    return defaultVisualSettings
+  const parsed = readJson<VisualSettings>(VISUAL_SETTINGS_KEY)
+  if (!parsed) return defaultVisualSettings
+
+  const view = parsed.defaultDashboardView
+  return {
+    compactMode: Boolean(parsed.compactMode),
+    showTips: parsed.showTips !== false,
+    showReadinessScore: parsed.showReadinessScore !== false,
+    defaultDashboardView: view === 'insights' || view === 'actions' ? view : 'overview',
   }
 }
 
 export function saveVisualSettings(settings: VisualSettings) {
-  localStorage.setItem(VISUAL_SETTINGS_KEY, JSON.stringify(settings))
+  writeJson(VISUAL_SETTINGS_KEY, settings)
 }

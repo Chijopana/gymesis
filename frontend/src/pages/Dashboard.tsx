@@ -1,155 +1,242 @@
-import { useEffect, useState } from 'react'
-import { BellRing, Dumbbell, Flame, RefreshCw, Swords, Target, TrendingUp, Users } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  BellRing,
+  Dumbbell,
+  Flame,
+  RefreshCw,
+  Sparkles,
+  Swords,
+  Target,
+  TrendingDown,
+  TrendingUp,
+  Users,
+} from 'lucide-react'
 import { Link } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import MiniBarChart from '../components/MiniBarChart'
 import PageHeader from '../components/PageHeader'
-import { friendService, groupService, routineService, trainingService } from '../services/api'
+import { SkeletonCards } from '../components/Skeleton'
+import { friendService, getErrorMessage, groupService, routineService, trainingService } from '../services/api'
 import { getCachedOrFetch } from '../utils/cache'
-import { computeWorkoutAnalytics } from '../utils/trainingAnalytics'
+import { computeWorkoutAnalytics, type HistoryEntry } from '../utils/trainingAnalytics'
 import { getDashboardAutoRefresh, getVisualSettings, saveDashboardAutoRefresh } from '../utils/settings'
+import { useAuthStore } from '../store/authStore'
+
+type View = 'overview' | 'insights' | 'actions'
+
+type Insights = {
+  predictedNextWeekVolumeKg: number
+  predictedNextSessionVolumeKg: number
+  currentStreakDays: number
+  daysSinceLastSession: number
+  weeklyTrendPercent: number
+  volumeLast7DaysKg: number
+  confidence: 'low' | 'medium' | 'high'
+  momentum: 'up' | 'stable' | 'down'
+}
+
+const EMPTY_INSIGHTS: Insights = {
+  predictedNextWeekVolumeKg: 0,
+  predictedNextSessionVolumeKg: 0,
+  currentStreakDays: 0,
+  daysSinceLastSession: 0,
+  weeklyTrendPercent: 0,
+  volumeLast7DaysKg: 0,
+  confidence: 'low',
+  momentum: 'stable',
+}
+
+const TIPS = [
+  'Dedica 2 minutos a movilidad antes de cada sesión.',
+  'Registra también los días flojos: la constancia real se mide con todo.',
+  'Descansos consistentes hacen que tu progreso sea comparable entre semanas.',
+  'Invita a alguien nuevo cada semana para mantener la motivación.',
+  'Sube el peso sólo cuando completes todas las series objetivo.',
+  'Dormir 7-8 h rinde más que cualquier suplemento.',
+  'Anota cómo te sentiste: explica los picos y los bajones.',
+]
+
+const REFRESH_INTERVAL_MS = 60_000
+const kg = (value: number) => `${value.toLocaleString('es-ES', { maximumFractionDigits: 0 })} kg`
+
+function StatCard({
+  icon: Icon,
+  label,
+  value,
+  to,
+  linkLabel,
+}: {
+  icon: typeof Dumbbell
+  label: string
+  value: number | string
+  to: string
+  linkLabel: string
+}) {
+  return (
+    <Link to={to} className="panel panel-hover block p-5">
+      <div className="soft-text flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide">
+        <Icon size={14} />
+        {label}
+      </div>
+      <div className="mt-2 text-4xl font-bold tabular-nums">{value}</div>
+      <span className="mt-3 inline-block text-sm font-semibold" style={{ color: 'var(--brand-strong)' }}>
+        {linkLabel} →
+      </span>
+    </Link>
+  )
+}
 
 export default function Dashboard() {
-  const [mainView, setMainView] = useState<'overview' | 'insights' | 'actions'>(getVisualSettings().defaultDashboardView)
+  const visualSettings = useMemo(() => getVisualSettings(), [])
+  const username = useAuthStore((state) => state.user?.username)
+  const [mainView, setMainView] = useState<View>(visualSettings.defaultDashboardView)
   const [stats, setStats] = useState({ routines: 0, friends: 0, trainings: 0, groups: 0 })
   const [pending, setPending] = useState({ friendRequests: 0, routineInvites: 0 })
-  const [analytics, setAnalytics] = useState({
-    sessionsLast7Days: 0,
-    volumeLast7DaysKg: 0,
-    averageVolumePerSessionKg: 0,
-    achievements: [] as string[],
-    topMuscles: [] as Array<[string, number]>,
-    dailyVolumeLast7Days: [] as Array<{ label: string; volume: number }>,
-  })
-  const [insights, setInsights] = useState({
-    predictedNextWeekVolumeKg: 0,
-    predictedNextSessionVolumeKg: 0,
-    currentStreakDays: 0,
-    daysSinceLastSession: 0,
-    weeklyTrendPercent: 0,
-    confidence: 'low' as 'low' | 'medium' | 'high',
-    momentum: 'stable' as 'up' | 'stable' | 'down',
-  })
+  const [analytics, setAnalytics] = useState(() => computeWorkoutAnalytics([]))
+  const [insights, setInsights] = useState<Insights>(EMPTY_INSIGHTS)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [lastUpdated, setLastUpdated] = useState('')
   const [error, setError] = useState('')
-  const [autoRefresh, setAutoRefresh] = useState(() => getDashboardAutoRefresh())
+  const [autoRefresh, setAutoRefresh] = useState(getDashboardAutoRefresh)
   const [cacheNotice, setCacheNotice] = useState('')
-  const visualSettings = getVisualSettings()
 
-  const tips = [
-    'Haz 2 minutos de movilidad antes de cada sesion.',
-    'Registra tambien dias ligeros para medir consistencia real.',
-    'Un descanso mas estricto mejora la comparacion de progreso.',
-    'Invita a alguien nuevo cada semana para mantener motivacion.',
-  ]
+  /**
+   * Contador de peticiones en vuelo. Con dos cargas solapadas (el doble montaje
+   * de StrictMode, o el auto-refresco pisando a un "Actualizar" manual), la que
+   * terminaba antes escribia sus resultados encima de la mas reciente: se veian
+   * los datos bien y a la vez un banner de error de la carga anterior.
+   */
+  const requestId = useRef(0)
 
-  const loadDashboard = async (silent = false) => {
+  const loadDashboard = useCallback(async (silent = false) => {
+    const thisRequest = ++requestId.current
+    const isStale = () => thisRequest !== requestId.current
+
     try {
       setError('')
       setCacheNotice('')
       if (!silent) setLoading(true)
       setRefreshing(true)
+
       const [routines, friends, trainings, insightData, groups] = await Promise.all([
         getCachedOrFetch(
           'gymesis:dashboard:routines',
           async () => {
-            const [routinesRes, invitationsRes] = await Promise.all([routineService.getRoutines(), routineService.getInvitations()])
+            const [routinesRes, invitationsRes] = await Promise.all([
+              routineService.getRoutines(),
+              routineService.getInvitations(),
+            ])
             return {
               routines: routinesRes.data.routines || [],
               invitations: invitationsRes.data.invitations || [],
             }
           },
-          { ttlMs: 60_000, version: 2 }
+          { ttlMs: 60_000, version: 3 }
         ),
-        getCachedOrFetch('gymesis:dashboard:friends', async () => friendService.getFriends().then((r) => r.data.friendships || []), {
-          ttlMs: 30_000,
-          version: 2,
-        }),
-        getCachedOrFetch('gymesis:dashboard:history', async () => trainingService.getHistory().then((r) => r.data.history || []), {
-          ttlMs: 30_000,
-          version: 2,
-        }),
-        getCachedOrFetch('gymesis:dashboard:insights', async () => trainingService.getInsights().then((r) => r.data.insights || null), {
+        getCachedOrFetch('gymesis:dashboard:friends', () => friendService.getFriends().then((r) => r.data.friendships || []), {
           ttlMs: 45_000,
-          version: 1,
+          version: 3,
         }),
-        getCachedOrFetch('gymesis:dashboard:groups', async () => groupService.getGroups().then((r) => r.data.groups || []), {
+        getCachedOrFetch('gymesis:dashboard:history', () => trainingService.getHistory().then((r) => r.data.history || []), {
+          ttlMs: 45_000,
+          version: 3,
+        }),
+        getCachedOrFetch('gymesis:dashboard:insights', () => trainingService.getInsights().then((r) => r.data.insights || null), {
           ttlMs: 45_000,
           version: 2,
+        }),
+        getCachedOrFetch('gymesis:dashboard:groups', () => groupService.getGroups().then((r) => r.data.groups || []), {
+          ttlMs: 60_000,
+          version: 3,
         }),
       ])
 
-      const acceptedFriends = (friends.data || []).filter((f: any) => f.status === 'accepted')
-      const pendingFriends = (friends.data || []).filter((f: any) => f.status === 'pending' && f.direction === 'incoming')
-      const pendingRoutineInvites = (routines.data.invitations || []).filter((i: any) => i.status === 'pending')
-      const computed = computeWorkoutAnalytics(trainings.data || [])
-      const topMuscles = Object.entries(computed.volumeByMuscle).sort((a, b) => b[1] - a[1]).slice(0, 3)
+      // Otra carga mas reciente ya ha empezado: estos datos van con retraso.
+      if (isStale()) return
+
+      const friendships = friends.data as Array<{ status: string; direction: string }>
+      const history = trainings.data as HistoryEntry[]
+      const computed = computeWorkoutAnalytics(history)
 
       setStats({
         routines: (routines.data.routines || []).length,
-        friends: acceptedFriends.length,
-        trainings: (trainings.data || []).length,
-        groups: (groups.data || []).length,
+        friends: friendships.filter((f) => f.status === 'accepted').length,
+        trainings: computed.totalSessions,
+        groups: (groups.data as unknown[]).length,
       })
 
       setPending({
-        friendRequests: pendingFriends.length,
-        routineInvites: pendingRoutineInvites.length,
+        friendRequests: friendships.filter((f) => f.status === 'pending' && f.direction === 'incoming').length,
+        routineInvites: (routines.data.invitations || []).filter((i: { status: string }) => i.status === 'pending').length,
       })
 
-      setAnalytics({
-        sessionsLast7Days: computed.sessionsLast7Days,
-        volumeLast7DaysKg: computed.volumeLast7DaysKg,
-        averageVolumePerSessionKg: computed.averageVolumePerSessionKg,
-        achievements: computed.achievements,
-        topMuscles,
-        dailyVolumeLast7Days: computed.dailyVolumeLast7Days,
-      })
+      setAnalytics(computed)
 
       if (insightData.data) {
-        setInsights({
-          predictedNextWeekVolumeKg: insightData.data.predictedNextWeekVolumeKg || 0,
-          predictedNextSessionVolumeKg: insightData.data.predictedNextSessionVolumeKg || 0,
-          currentStreakDays: insightData.data.currentStreakDays || 0,
-          daysSinceLastSession: insightData.data.daysSinceLastSession || 0,
-          weeklyTrendPercent: insightData.data.weeklyTrendPercent || 0,
-          confidence: insightData.data.confidence || 'low',
-          momentum: insightData.data.momentum || 'stable',
-        })
+        setInsights({ ...EMPTY_INSIGHTS, ...insightData.data })
       }
 
       if (routines.stale || friends.stale || trainings.stale || insightData.stale || groups.stale) {
-        setCacheNotice('Sin conexion estable: se muestran datos locales recientes.')
+        setCacheNotice('Sin conexión estable: se muestran los últimos datos guardados en este dispositivo.')
       }
 
       setLastUpdated(new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }))
-    } catch {
-      setError('No se pudo actualizar el dashboard')
+    } catch (err) {
+      if (isStale()) return
+      setError(getErrorMessage(err, 'No se ha podido actualizar el dashboard.'))
     } finally {
-      if (!silent) setLoading(false)
-      setRefreshing(false)
+      // Sólo la última carga apaga los indicadores.
+      if (!isStale()) {
+        setLoading(false)
+        setRefreshing(false)
+      }
     }
-  }
-
-  useEffect(() => {
-    loadDashboard()
   }, [])
 
   useEffect(() => {
+    loadDashboard()
+  }, [loadDashboard])
+
+  useEffect(() => {
     if (!autoRefresh) return
-    const interval = window.setInterval(() => loadDashboard(true), 30000)
+    const interval = window.setInterval(() => {
+      if (!document.hidden) loadDashboard(true)
+    }, REFRESH_INTERVAL_MS)
     return () => window.clearInterval(interval)
-  }, [autoRefresh])
+  }, [autoRefresh, loadDashboard])
 
   useEffect(() => {
     saveDashboardAutoRefresh(autoRefresh)
   }, [autoRefresh])
 
-  const readinessScore = Math.min(100, stats.routines * 12 + stats.friends * 8 + stats.trainings * 5 + stats.groups * 10)
-  const tipOfTheDay = tips[new Date().getDate() % tips.length]
-  const streakEstimate = Math.max(1, Math.min(30, Math.round(stats.trainings / 2)))
+  const topMuscles = useMemo(
+    () =>
+      Object.entries(analytics.volumeByMuscle)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6),
+    [analytics.volumeByMuscle]
+  )
+
+  /**
+   * Puntuación de preparación a partir de señales reales de entrenamiento
+   * (constancia, frescura, tendencia), no de cuántas rutinas o grupos tengas:
+   * antes crear cuatro grupos vacíos ya te daba un 100.
+   */
+  const readiness = useMemo(() => {
+    const consistency = Math.min(40, analytics.trainingDaysLast7Days * 10)
+    const freshness = Math.max(0, 30 - insights.daysSinceLastSession * 6)
+    const streak = Math.min(15, insights.currentStreakDays * 3)
+    const trend = insights.momentum === 'up' ? 15 : insights.momentum === 'stable' ? 9 : 3
+    return Math.round(Math.min(100, consistency + freshness + streak + trend))
+  }, [analytics.trainingDaysLast7Days, insights.currentStreakDays, insights.daysSinceLastSession, insights.momentum])
+
+  const readinessLabel =
+    readiness >= 75 ? 'En racha' : readiness >= 45 ? 'En marcha' : readiness > 0 ? 'Retomando' : 'Sin datos aún'
+
+  const tipOfTheDay = TIPS[new Date().getDate() % TIPS.length]
+  const totalPending = pending.friendRequests + pending.routineInvites
+  const MomentumIcon = insights.momentum === 'down' ? TrendingDown : TrendingUp
 
   return (
     <>
@@ -157,209 +244,257 @@ export default function Dashboard() {
       <main id="main-content" className="page-shell">
         <PageHeader
           icon={<TrendingUp className="title-icon" />}
-          title="Tu centro de rendimiento"
-          subtitle="Todo lo importante de hoy: progreso, equipo y siguientes acciones."
+          title={username ? `Hola, ${username}` : 'Tu centro de rendimiento'}
+          subtitle="Progreso, equipo y siguientes pasos, todo en una pantalla."
           actions={
             <>
-              <button className="btn-soft text-sm inline-flex items-center gap-1" onClick={() => loadDashboard(true)}>
-                <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />Actualizar
+              <button className="btn-soft btn-sm" onClick={() => loadDashboard(true)} disabled={refreshing}>
+                <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
+                Actualizar
               </button>
-              <button className={`btn-soft text-sm ${autoRefresh ? 'ring-2 ring-cyan-400' : ''}`} onClick={() => setAutoRefresh((v) => !v)}>
-                Actualizar cada 30s {autoRefresh ? 'ON' : 'OFF'}
+              <button
+                className={`btn-soft btn-sm ${autoRefresh ? 'is-active' : ''}`}
+                onClick={() => setAutoRefresh((value) => !value)}
+                aria-pressed={autoRefresh}
+                title="Refresca las métricas cada minuto sin recargar la página"
+              >
+                Auto {autoRefresh ? 'ON' : 'OFF'}
               </button>
             </>
           }
           meta={
-            <div className="flex flex-wrap gap-2 items-center">
+            <>
               <span className="tiny-badge">Actualizado: {lastUpdated || '--:--'}</span>
-              <span className="tiny-badge"><Flame size={12} />Racha: {streakEstimate} d</span>
-            </div>
+              <span className={`tiny-badge ${insights.currentStreakDays > 0 ? 'tiny-badge-success' : ''}`}>
+                <Flame size={12} />
+                Racha: {insights.currentStreakDays} {insights.currentStreakDays === 1 ? 'día' : 'días'}
+              </span>
+              {insights.daysSinceLastSession > 2 && (
+                <span className="tiny-badge tiny-badge-warning">
+                  Sin entrenar hace {insights.daysSinceLastSession} días
+                </span>
+              )}
+              {totalPending > 0 && (
+                <Link to="/notifications" className="tiny-badge tiny-badge-brand">
+                  <BellRing size={12} />
+                  {totalPending} pendiente{totalPending === 1 ? '' : 's'}
+                </Link>
+              )}
+            </>
           }
         />
 
-        {error && <div className="mb-4 status-error">{error}</div>}
-        <div className="soft-text text-sm mb-3">La actualización automática refresca métricas sin que pulses "Actualizar" manualmente.</div>
-
-        {loading && (
-          <div className="panel p-6 inline-flex items-center gap-3 soft-text mb-6">
-            <span className="loader" />Cargando resumen...
+        {error && (
+          <div role="alert" className="status-error mb-4">
+            {error}
           </div>
         )}
+        {cacheNotice && <div className="status-info mb-4">{cacheNotice}</div>}
 
-        <div className="mobile-tabs mb-4">
-          <button type="button" className={`mobile-tab ${mainView === 'overview' ? 'active' : ''}`} onClick={() => setMainView('overview')}>Resumen</button>
-          <button type="button" className={`mobile-tab ${mainView === 'insights' ? 'active' : ''}`} onClick={() => setMainView('insights')}>Insights</button>
-          <button type="button" className={`mobile-tab ${mainView === 'actions' ? 'active' : ''}`} onClick={() => setMainView('actions')}>Acciones</button>
+        <div className="mobile-tabs mb-5" role="tablist">
+          {(
+            [
+              ['overview', 'Resumen'],
+              ['insights', 'Analítica'],
+              ['actions', 'Acciones'],
+            ] as Array<[View, string]>
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={mainView === value}
+              className={`mobile-tab ${mainView === value ? 'active' : ''}`}
+              onClick={() => setMainView(value)}
+            >
+              {label}
+            </button>
+          ))}
         </div>
 
         {mainView === 'overview' && (
-        <>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-          <div className="panel panel-hover p-6">
-            <div className="soft-text text-sm font-semibold uppercase inline-flex items-center gap-1"><Dumbbell size={14} />Rutinas</div>
-            <div className="text-4xl font-bold text-slate-900 dark:text-slate-100 mt-2">{stats.routines}</div>
-            <Link to="/routines" className="text-sky-500 text-sm mt-4 hover:underline">Ver rutinas →</Link>
-          </div>
+          <div className="animate-in space-y-6">
+            {loading ? (
+              <SkeletonCards count={4} className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4" />
+            ) : (
+              <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+                <StatCard icon={Dumbbell} label="Rutinas" value={stats.routines} to="/routines" linkLabel="Ver rutinas" />
+                <StatCard icon={Users} label="Amigos" value={stats.friends} to="/friends" linkLabel="Ver amigos" />
+                <StatCard icon={Target} label="Días entrenados" value={stats.trainings} to="/trainings" linkLabel="Historial" />
+                <StatCard icon={Swords} label="Grupos" value={stats.groups} to="/groups" linkLabel="Ver grupos" />
+              </div>
+            )}
 
-          <div className="panel panel-hover p-6">
-            <div className="soft-text text-sm font-semibold uppercase inline-flex items-center gap-1"><Users size={14} />Amigos</div>
-            <div className="text-4xl font-bold text-slate-900 dark:text-slate-100 mt-2">{stats.friends}</div>
-            <Link to="/friends" className="text-sky-500 text-sm mt-4 hover:underline">Ver amigos →</Link>
-          </div>
+            {visualSettings.showReadinessScore && (
+              <section className="panel p-6">
+                <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+                  <div>
+                    <h2 className="text-xl font-semibold">Nivel de preparación</h2>
+                    <p className="section-subtitle">
+                      Combina días entrenados esta semana, frescura, racha y tendencia de volumen.
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-3xl font-bold tabular-nums">{readiness}</div>
+                    <div className="soft-text text-xs font-semibold uppercase">{readinessLabel}</div>
+                  </div>
+                </div>
+                <div className="meter" role="img" aria-label={`Preparación: ${readiness} de 100`}>
+                  <span style={{ width: `${readiness}%` }} />
+                </div>
+              </section>
+            )}
 
-          <div className="panel panel-hover p-6">
-            <div className="soft-text text-sm font-semibold uppercase inline-flex items-center gap-1"><Target size={14} />Entrenamientos</div>
-            <div className="text-4xl font-bold text-slate-900 dark:text-slate-100 mt-2">{stats.trainings}</div>
-            <Link to="/trainings" className="text-sky-500 text-sm mt-4 hover:underline">Historial →</Link>
+            <section className="panel p-5">
+              <div className="kpi-strip">
+                <span className="tiny-badge">Días entrenados (7d): {analytics.trainingDaysLast7Days}</span>
+                <span className="tiny-badge">Volumen 7d: {kg(analytics.volumeLast7DaysKg)}</span>
+                <span className="tiny-badge">Media por día: {kg(analytics.averageVolumePerSessionKg)}</span>
+                <span className="tiny-badge">Mejor día: {kg(analytics.bestSessionVolumeKg)}</span>
+                <span className="tiny-badge">Volumen total: {kg(analytics.totalVolumeKg)}</span>
+              </div>
+            </section>
           </div>
-
-          <div className="panel panel-hover p-6">
-            <div className="soft-text text-sm font-semibold uppercase inline-flex items-center gap-1"><Swords size={14} />Grupos</div>
-            <div className="text-4xl font-bold text-slate-900 dark:text-slate-100 mt-2">{stats.groups}</div>
-            <Link to="/groups" className="text-sky-500 text-sm mt-4 hover:underline">Ver grupos →</Link>
-          </div>
-        </div>
-
-        <section className="panel p-4 mb-6 stack-gap">
-          <div className="flex flex-wrap gap-2">
-            <span className="tiny-badge">Pendientes totales: {pending.friendRequests + pending.routineInvites}</span>
-            <span className="tiny-badge">Actividad total: {stats.routines + stats.trainings + stats.groups}</span>
-            <span className="tiny-badge">Base social: {stats.friends}</span>
-            <span className="tiny-badge">Sesiones 7d: {analytics.sessionsLast7Days}</span>
-            <span className="tiny-badge">Volumen 7d: {analytics.volumeLast7DaysKg.toFixed(1)} kg</span>
-            <span className="tiny-badge">Promedio/sesion: {analytics.averageVolumePerSessionKg.toFixed(1)} kg</span>
-          </div>
-          <div className="text-sm soft-text">Resumen rápido antes de entrar al detalle.</div>
-        </section>
-
-        {cacheNotice && <div className="mb-4 status-info">{cacheNotice}</div>}
-
-        {visualSettings.showReadinessScore && (
-        <section className="panel p-6 mb-6">
-          <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100 mb-2">Nivel de preparacion</h2>
-          <p className="section-subtitle mb-2">Puntuacion simple basada en actividad social y de entrenamiento.</p>
-          <div className="w-full rounded-full h-3 bg-slate-300/50 dark:bg-slate-700 overflow-hidden">
-            <div className="h-full bg-gradient-to-r from-sky-400 to-emerald-500" style={{ width: `${readinessScore}%` }} />
-          </div>
-          <div className="mt-2 text-sm soft-text">Score actual: <strong className="text-slate-900 dark:text-slate-100">{readinessScore}/100</strong></div>
-        </section>
-        )}
-        </>
         )}
 
         {mainView === 'insights' && (
-        <>
-        <section className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-          <MiniBarChart
-            title="Volumen de la ultima semana"
-            subtitle="Trabajo total por dia en los ultimos 7 dias."
-            valueSuffix=" kg"
-            items={analytics.dailyVolumeLast7Days.map((item) => ({
-              label: item.label,
-              value: item.volume,
-            }))}
-            emptyLabel="Aun no hay volumen registrado esta semana."
-          />
+          <div className="animate-in space-y-6">
+            <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+              <MiniBarChart
+                title="Volumen de los últimos 7 días"
+                subtitle="Trabajo total levantado cada día."
+                valueSuffix=" kg"
+                precision={0}
+                items={analytics.dailyVolumeLast7Days.map((item) => ({ label: item.label, value: item.volume }))}
+                emptyLabel="Aún no has registrado volumen esta semana."
+              />
+              <MiniBarChart
+                title="Volumen por grupo muscular"
+                subtitle="Dónde se concentra tu trabajo acumulado."
+                valueSuffix=" kg"
+                precision={0}
+                items={topMuscles.map(([label, value]) => ({ label, value }))}
+                emptyLabel="Registra entrenamientos para ver tu reparto muscular."
+              />
+            </section>
 
-          <MiniBarChart
-            title="Grupos musculares dominantes"
-            subtitle="Donde se concentra tu volumen total acumulado."
-            valueSuffix=" kg"
-            items={analytics.topMuscles.map(([label, value]) => ({ label, value }))}
-            emptyLabel="Aun no hay volumen por grupo muscular."
-          />
-        </section>
-        
-        <section className="panel p-4 mt-2 mb-6">
-          <div className="text-sm soft-text mb-2">Top grupos musculares por volumen</div>
-          <div className="flex flex-wrap gap-2 mb-2">
-            {analytics.topMuscles.map(([muscle, volume]) => (
-              <span key={muscle} className="tiny-badge">{muscle}: {volume.toFixed(1)} kg</span>
-            ))}
-            {analytics.topMuscles.length === 0 && <span className="soft-text">Aun sin datos de volumen.</span>}
-          </div>
-          <div className="text-sm soft-text mb-1">Logros desbloqueables</div>
-          <div className="space-y-1">
-            {analytics.achievements.length > 0 ? analytics.achievements.map((item) => (
-              <div key={item} className="status-success">{item}</div>
-            )) : <div className="soft-text">Sigue registrando entrenamientos para desbloquear logros.</div>}
-          </div>
-        </section>
+            <section className="panel p-6">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-semibold">Previsión</h2>
+                  <p className="section-subtitle">Estimada a partir de tu historial reciente y la tendencia semanal.</p>
+                </div>
+                <span className="tiny-badge">
+                  Confianza:{' '}
+                  {insights.confidence === 'high' ? 'alta' : insights.confidence === 'medium' ? 'media' : 'baja'}
+                </span>
+              </div>
 
-        <section className="panel p-6 mb-6 border border-cyan-500/20 bg-gradient-to-br from-white/80 to-cyan-50/70 dark:from-slate-950/70 dark:to-slate-900/60">
-          <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-            <div>
-              <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100">Prediccion simple</h2>
-              <p className="section-subtitle">Se estima a partir de tu historial reciente y la tendencia de volumen.</p>
-            </div>
-            <span className="tiny-badge">Confianza: {insights.confidence}</span>
+              <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                {[
+                  { label: 'Volumen previsto (7d)', value: kg(insights.predictedNextWeekVolumeKg) },
+                  { label: 'Próxima sesión', value: kg(insights.predictedNextSessionVolumeKg) },
+                  { label: 'Racha actual', value: `${insights.currentStreakDays} d` },
+                  { label: 'Tendencia semanal', value: `${insights.weeklyTrendPercent > 0 ? '+' : ''}${insights.weeklyTrendPercent.toFixed(0)}%` },
+                ].map((item) => (
+                  <div key={item.label} className="panel-sunken p-4">
+                    <div className="soft-text text-xs font-semibold uppercase tracking-wide">{item.label}</div>
+                    <div className="mt-1 text-2xl font-bold tabular-nums">{item.value}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="kpi-strip mt-4">
+                <span
+                  className={`tiny-badge ${
+                    insights.momentum === 'up'
+                      ? 'tiny-badge-success'
+                      : insights.momentum === 'down'
+                        ? 'tiny-badge-warning'
+                        : ''
+                  }`}
+                >
+                  <MomentumIcon size={12} />
+                  {insights.momentum === 'up' ? 'Subiendo' : insights.momentum === 'down' ? 'Bajando' : 'Estable'}
+                </span>
+                <span className="tiny-badge">Días desde la última sesión: {insights.daysSinceLastSession}</span>
+              </div>
+
+              {insights.confidence === 'low' && (
+                <p className="soft-text mt-3 text-sm">
+                  Con pocos entrenamientos la previsión es orientativa. Registra unas cuantas sesiones más para afinarla.
+                </p>
+              )}
+            </section>
+
+            <section className="panel p-5">
+              <h2 className="mb-3 inline-flex items-center gap-2 text-xl font-semibold">
+                <Sparkles size={18} />
+                Logros
+              </h2>
+              {analytics.achievements.length > 0 ? (
+                <ul className="space-y-2">
+                  {analytics.achievements.map((item) => (
+                    <li key={item} className="status-success">
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="empty-state">Sigue registrando entrenamientos para desbloquear logros.</div>
+              )}
+            </section>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-            <div className="rounded-xl border border-slate-500/20 bg-white/60 dark:bg-slate-900/40 p-4">
-              <div className="soft-text text-sm">Volumen previsto 7d</div>
-              <div className="text-3xl font-bold text-slate-900 dark:text-slate-100">{insights.predictedNextWeekVolumeKg.toFixed(0)} kg</div>
-            </div>
-            <div className="rounded-xl border border-slate-500/20 bg-white/60 dark:bg-slate-900/40 p-4">
-              <div className="soft-text text-sm">Siguiente sesion estimada</div>
-              <div className="text-3xl font-bold text-slate-900 dark:text-slate-100">{insights.predictedNextSessionVolumeKg.toFixed(0)} kg</div>
-            </div>
-            <div className="rounded-xl border border-slate-500/20 bg-white/60 dark:bg-slate-900/40 p-4">
-              <div className="soft-text text-sm">Racha actual</div>
-              <div className="text-3xl font-bold text-slate-900 dark:text-slate-100">{insights.currentStreakDays} d</div>
-            </div>
-            <div className="rounded-xl border border-slate-500/20 bg-white/60 dark:bg-slate-900/40 p-4">
-              <div className="soft-text text-sm">Tendencia</div>
-              <div className="text-3xl font-bold text-slate-900 dark:text-slate-100">{insights.weeklyTrendPercent.toFixed(0)}%</div>
-            </div>
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2 text-sm">
-            <span className={`tiny-badge ${insights.momentum === 'up' ? 'ring-1 ring-emerald-400/40' : insights.momentum === 'down' ? 'ring-1 ring-amber-400/40' : ''}`}>
-              Momento: {insights.momentum === 'up' ? 'subiendo' : insights.momentum === 'down' ? 'bajando' : 'estable'}
-            </span>
-            <span className="tiny-badge">Dias desde la ultima sesion: {insights.daysSinceLastSession}</span>
-          </div>
-        </section>
-        </>
         )}
 
         {mainView === 'actions' && (
-        <>
-        <section className="panel p-5">
-          <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100 mb-2">Acciones rapidas</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-            <Link to="/routines" className="block w-full text-center btn-primary py-3">Rutinas</Link>
-            <Link to="/friends" className="block w-full text-center btn-soft py-3">Amigos</Link>
-            <Link to="/trainings" className="block w-full text-center btn-soft py-3">Entrenar</Link>
-          </div>
-        </section>
+          <div className="animate-in space-y-6">
+            <section className="panel p-5">
+              <h2 className="mb-3 text-xl font-semibold">Acciones rápidas</h2>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <Link to="/trainings" className="btn-primary justify-center py-3">
+                  <Dumbbell size={16} />
+                  Registrar entreno
+                </Link>
+                <Link to="/routines" className="btn-soft justify-center py-3">
+                  Crear rutina
+                </Link>
+                <Link to="/friends" className="btn-soft justify-center py-3">
+                  Buscar amigos
+                </Link>
+              </div>
+            </section>
 
-        <section className="panel p-5 mt-6">
-          <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100 mb-2 inline-flex items-center gap-2"><BellRing size={18} />Pendientes</h2>
-          <p className="section-subtitle mb-3">Acciones que te desbloquean progreso social y retos.</p>
-          <div className="status-success mb-3 inline-flex items-center gap-2">
-            <span>Total pendientes:</span>
-            <strong>{pending.friendRequests + pending.routineInvites}</strong>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div className="border border-slate-500/30 dark:border-slate-700 rounded-lg p-4 bg-white/40 dark:bg-slate-900/35">
-              <div className="soft-text text-sm">Solicitudes de amistad</div>
-              <div className="text-3xl font-bold text-slate-900 dark:text-slate-100">{pending.friendRequests}</div>
-            </div>
-            <div className="border border-slate-500/30 dark:border-slate-700 rounded-lg p-4 bg-white/40 dark:bg-slate-900/35">
-              <div className="soft-text text-sm">Invitaciones de rutina</div>
-              <div className="text-3xl font-bold text-slate-900 dark:text-slate-100">{pending.routineInvites}</div>
-            </div>
-          </div>
-          <Link to="/notifications" className="inline-block mt-4 btn-primary">Abrir centro de notificaciones</Link>
-        </section>
+            <section className="panel p-5">
+              <h2 className="mb-1 inline-flex items-center gap-2 text-xl font-semibold">
+                <BellRing size={18} />
+                Pendientes
+              </h2>
+              <p className="section-subtitle mb-4">Lo que otras personas están esperando de ti.</p>
 
-        {visualSettings.showTips && (
-        <section className="panel p-4 mt-6">
-          <div className="text-sm soft-text">Tip del dia</div>
-          <div className="font-semibold text-slate-900 dark:text-slate-100">{tipOfTheDay}</div>
-        </section>
-        )}
-        </>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="panel-sunken p-4">
+                  <div className="soft-text text-sm">Solicitudes de amistad</div>
+                  <div className="mt-1 text-3xl font-bold tabular-nums">{pending.friendRequests}</div>
+                </div>
+                <div className="panel-sunken p-4">
+                  <div className="soft-text text-sm">Invitaciones de rutina</div>
+                  <div className="mt-1 text-3xl font-bold tabular-nums">{pending.routineInvites}</div>
+                </div>
+              </div>
+
+              <Link to="/notifications" className="btn-primary mt-4 inline-flex">
+                Abrir centro de avisos
+              </Link>
+            </section>
+
+            {visualSettings.showTips && (
+              <section className="panel p-5">
+                <div className="soft-text text-xs font-bold uppercase tracking-wide">Consejo del día</div>
+                <p className="mt-1 text-lg font-semibold">{tipOfTheDay}</p>
+              </section>
+            )}
+          </div>
         )}
       </main>
     </>

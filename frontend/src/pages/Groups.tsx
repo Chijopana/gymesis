@@ -1,869 +1,797 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  ArrowDownAZ,
   Copy,
-  ImagePlus,
+  Crown,
+  LogOut,
   PlusCircle,
   RefreshCw,
   Search,
   Swords,
+  Trash2,
   Trophy,
   UserPlus,
   Users,
-} from "lucide-react";
-import Navbar from "../components/Navbar";
-import PageHeader from "../components/PageHeader";
-import { useIsLargeScreen } from "../hooks/useResponsive";
-import { groupService } from "../services/api";
-import { useAuthStore } from "../store/authStore";
+} from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import Navbar from '../components/Navbar'
+import PageHeader from '../components/PageHeader'
+import { SkeletonList } from '../components/Skeleton'
+import { useConfirm } from '../components/ConfirmDialog'
+import { friendService, getErrorMessage, groupService } from '../services/api'
+import { emitFeedback } from '../utils/feedback'
+import { useAuthStore } from '../store/authStore'
 
 type Group = {
-  id: string;
-  name: string;
-  members_count?: number;
-  description?: string;
-  group_image_url?: string;
-  routine_name?: string | null;
-  creator_username?: string;
-  creator_id?: string;
-};
+  id: string
+  name: string
+  description?: string
+  members_count?: number
+  routine_name?: string | null
+  creator_username?: string
+  creator_id?: string
+  is_creator?: boolean
+  pending_requests_count?: number
+}
 
-type JoinRequest = {
-  id: string;
-  user_id: string;
-  username: string;
-  created_at: string;
-};
-type GroupDetails = Group & {
-  members?: Array<{ user_id: string; username: string; joined_at: string }>;
-};
+type Member = {
+  user_id: string
+  username: string
+  joined_at: string
+  is_creator?: boolean
+  total_volume?: number | string
+}
+
+type JoinRequest = { id: string; user_id: string; username: string; created_at: string }
+
 type Competition = {
-  id: string;
-  name: string;
-  group_id_1: string;
-  group_id_2: string;
-  group_1_name: string;
-  group_2_name: string;
-};
+  id: string
+  name: string
+  group_id_1: string
+  group_id_2: string
+  group_1_name: string
+  group_2_name: string
+  start_date?: string | null
+  end_date?: string | null
+}
 
-type MobileView = "onboarding" | "groups" | "competitions" | "manage";
+type ScoreRow = { group_id: string; total_volume: number; members_count: number; sessions: number }
+
+type Friend = { friend_id: string; friend_username: string; status: string }
+
+const kg = (value: number | string) => `${Math.round(Number(value) || 0).toLocaleString('es-ES')} kg`
 
 export default function Groups() {
-  const warsInMaintenance = true;
-  const isLargeScreen = useIsLargeScreen();
-  const currentUserId = useAuthStore((state) => state.user?.id);
-  const [joinRequests, setJoinRequests] = useState<JoinRequest[]>([]);
-  const [groups, setGroups] = useState<Group[]>([]);
-  const [competitions, setCompetitions] = useState<Competition[]>([]);
-  const [selectedGroupId, setSelectedGroupId] = useState("");
-  const [selectedGroup, setSelectedGroup] = useState<GroupDetails | null>(null);
-  const [error, setError] = useState("");
-  const [statusMessage, setStatusMessage] = useState("");
-  const [groupForm, setGroupForm] = useState({
-    name: "",
-    description: "",
-    groupImageUrl: "",
-  });
-  const [inviteUserId, setInviteUserId] = useState("");
-  const [compForm, setCompForm] = useState({
-    rivalGroupId: "",
-    name: "",
-    startDate: "",
-    endDate: "",
-  });
-  const [scoresByCompetition, setScoresByCompetition] = useState<
-    Record<string, string>
-  >({});
-  const [loadingGroups, setLoadingGroups] = useState(true);
-  const [loadingCompetitions, setLoadingCompetitions] = useState(true);
-  const [groupQuery, setGroupQuery] = useState("");
-  const [competitionQuery, setCompetitionQuery] = useState("");
-  const [sortAsc, setSortAsc] = useState(true);
-  const [mobileView, setMobileView] = useState<MobileView>("onboarding");
-  const [joinLookupId, setJoinLookupId] = useState("");
-  const [joinLookupResult, setJoinLookupResult] = useState<{
-    id: string;
-    name: string;
-  } | null>(null);
+  const navigate = useNavigate()
+  const { confirm, confirmDialog } = useConfirm()
+  const currentUserId = useAuthStore((state) => state.user?.id)
 
-  const hasGroups = groups.length > 0;
+  const [groups, setGroups] = useState<Group[]>([])
+  const [competitions, setCompetitions] = useState<Competition[]>([])
+  const [friends, setFriends] = useState<Friend[]>([])
+  const [selectedGroupId, setSelectedGroupId] = useState('')
+  const [selectedGroup, setSelectedGroup] = useState<Group | null>(null)
+  const [members, setMembers] = useState<Member[]>([])
+  const [joinRequests, setJoinRequests] = useState<JoinRequest[]>([])
+  const [scores, setScores] = useState<Record<string, ScoreRow[]>>({})
 
-  useEffect(() => {
-    if (!hasGroups) {
-      setMobileView("onboarding");
-      return;
-    }
-    if (mobileView === "onboarding") {
-      setMobileView("groups");
-    }
-  }, [hasGroups, mobileView]);
+  const [loadingGroups, setLoadingGroups] = useState(true)
+  const [busy, setBusy] = useState('')
+  const [error, setError] = useState('')
+  const [groupQuery, setGroupQuery] = useState('')
 
-  const loadGroups = async () => {
-    setLoadingGroups(true);
+  const [groupForm, setGroupForm] = useState({ name: '', description: '', groupImageUrl: '' })
+  const [inviteFriendId, setInviteFriendId] = useState('')
+  const [compForm, setCompForm] = useState({ rivalGroupId: '', name: '', startDate: '', endDate: '' })
+  const [joinLookupId, setJoinLookupId] = useState('')
+  const [lookupResult, setLookupResult] = useState<{
+    id: string
+    name: string
+    members_count?: number
+    is_member?: boolean
+    has_pending_request?: boolean
+  } | null>(null)
+
+  const loadGroups = useCallback(async () => {
     try {
-      setError("");
-      const response = await groupService.getGroups();
-      const data = response.data.groups || [];
-      setGroups(data);
-      if (!selectedGroupId && data.length > 0) {
-        setSelectedGroupId(data[0].id);
-      }
-    } catch (err: any) {
-      setError(err.response?.data?.error || "No se pudieron cargar grupos");
+      setLoadingGroups(true)
+      setError('')
+      const response = await groupService.getGroups()
+      const data: Group[] = response.data.groups || []
+      setGroups(data)
+      setSelectedGroupId((current) => (current && data.some((g) => g.id === current) ? current : data[0]?.id || ''))
+    } catch (err) {
+      setError(getErrorMessage(err, 'No se han podido cargar los grupos.'))
     } finally {
-      setLoadingGroups(false);
+      setLoadingGroups(false)
     }
-  };
+  }, [])
 
-  const loadJoinRequests = async (groupId: string) => {
+  const loadCompetitions = useCallback(async () => {
     try {
-      const response = await groupService.listJoinRequests(groupId);
-      setJoinRequests(response.data.requests || []);
+      const response = await groupService.listMyCompetitions()
+      setCompetitions(response.data.competitions || [])
     } catch {
-      setJoinRequests([]);
+      setCompetitions([])
     }
-  };
+  }, [])
+
+  const loadFriends = useCallback(async () => {
+    try {
+      const response = await friendService.getFriends()
+      setFriends((response.data.friendships || []).filter((f: Friend) => f.status === 'accepted'))
+    } catch {
+      setFriends([])
+    }
+  }, [])
+
+  const loadGroupDetail = useCallback(
+    async (groupId: string) => {
+      if (!groupId) {
+        setSelectedGroup(null)
+        setMembers([])
+        setJoinRequests([])
+        return
+      }
+      try {
+        const response = await groupService.getGroupById(groupId)
+        // El backend ya devuelve members_count en el propio grupo: antes se
+        // descartaba y la ficha mostraba siempre "Miembros: 0".
+        setSelectedGroup(response.data.group)
+        setMembers(response.data.members || [])
+
+        if (response.data.group?.creator_id === currentUserId) {
+          const requests = await groupService.listJoinRequests(groupId)
+          setJoinRequests(requests.data.requests || [])
+        } else {
+          setJoinRequests([])
+        }
+      } catch {
+        setSelectedGroup(null)
+        setMembers([])
+        setJoinRequests([])
+      }
+    },
+    [currentUserId]
+  )
 
   useEffect(() => {
-    if (
-      selectedGroup &&
-      currentUserId &&
-      selectedGroup.creator_id === currentUserId
-    ) {
-      loadJoinRequests(selectedGroup.id);
-    } else {
-      setJoinRequests([]);
-    }
-  }, [selectedGroup, currentUserId]);
+    loadGroups()
+    loadCompetitions()
+    loadFriends()
+  }, [loadGroups, loadCompetitions, loadFriends])
 
-  const respondJoinRequest = async (
-    requestId: string,
-    action: "accepted" | "rejected",
-  ) => {
-    if (!selectedGroupId) return;
-    try {
-      await groupService.respondJoinRequest(selectedGroupId, requestId, action);
-      await loadJoinRequests(selectedGroupId);
-      await loadGroups();
-      setStatusMessage(
-        action === "accepted" ? "Solicitud aceptada" : "Solicitud rechazada",
-      );
-    } catch (err: any) {
-      setError(
-        err.response?.data?.error || "No se pudo responder la solicitud",
-      );
-    }
-  };
+  useEffect(() => {
+    loadGroupDetail(selectedGroupId)
+  }, [selectedGroupId, loadGroupDetail])
 
-  const loadCompetitions = async () => {
-    setLoadingCompetitions(true);
+  const runAction = async (key: string, action: () => Promise<unknown>, success: string) => {
     try {
-      const response = await groupService.listMyCompetitions();
-      setCompetitions(response.data.competitions || []);
+      setBusy(key)
+      setError('')
+      await action()
+      emitFeedback({ kind: 'success', title: success })
+      return true
+    } catch (err) {
+      const message = getErrorMessage(err)
+      setError(message)
+      emitFeedback({ kind: 'error', title: 'No ha sido posible', message })
+      return false
     } finally {
-      setLoadingCompetitions(false);
+      setBusy('')
     }
-  };
+  }
 
-  useEffect(() => {
-    loadGroups().catch(() => undefined);
-    loadCompetitions().catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
-    if (!selectedGroupId) {
-      setSelectedGroup(null);
-      return;
+  const createGroup = async (event: React.FormEvent) => {
+    event.preventDefault()
+    const ok = await runAction('create', () => groupService.createGroup(groupForm), 'Grupo creado')
+    if (ok) {
+      setGroupForm({ name: '', description: '', groupImageUrl: '' })
+      await loadGroups()
     }
-    groupService
-      .getGroupById(selectedGroupId)
-      .then((response) => setSelectedGroup(response.data.group))
-      .catch(() => setSelectedGroup(null));
-  }, [selectedGroupId]);
+  }
 
-  useEffect(() => {
-    if (!statusMessage) return;
-    const timer = window.setTimeout(() => setStatusMessage(""), 2600);
-    return () => window.clearTimeout(timer);
-  }, [statusMessage]);
+  const inviteFriend = async () => {
+    if (!selectedGroupId || !inviteFriendId) return
+    const ok = await runAction(
+      'invite',
+      () => groupService.inviteMember(selectedGroupId, inviteFriendId),
+      'Miembro añadido al grupo'
+    )
+    if (ok) {
+      setInviteFriendId('')
+      await Promise.all([loadGroups(), loadGroupDetail(selectedGroupId)])
+    }
+  }
 
-  const createGroup = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const respondJoinRequest = async (requestId: string, action: 'accepted' | 'rejected') => {
+    const ok = await runAction(
+      requestId,
+      () => groupService.respondJoinRequest(selectedGroupId, requestId, action),
+      action === 'accepted' ? 'Solicitud aceptada' : 'Solicitud rechazada'
+    )
+    if (ok) await Promise.all([loadGroups(), loadGroupDetail(selectedGroupId)])
+  }
+
+  const removeMember = async (member: Member) => {
+    const isSelf = member.user_id === currentUserId
+    const ok = await confirm({
+      title: isSelf ? 'Salir del grupo' : `Expulsar a ${member.username}`,
+      message: isSelf
+        ? 'Dejarás de ver este grupo y sus competencias.'
+        : `${member.username} dejará de pertenecer al grupo.`,
+      confirmLabel: isSelf ? 'Salir' : 'Expulsar',
+      tone: 'danger',
+    })
+    if (!ok) return
+
+    const done = await runAction(
+      member.user_id,
+      () => groupService.removeMember(selectedGroupId, member.user_id),
+      isSelf ? 'Has salido del grupo' : 'Miembro expulsado'
+    )
+    if (done) {
+      if (isSelf) setSelectedGroupId('')
+      await Promise.all([loadGroups(), loadGroupDetail(isSelf ? '' : selectedGroupId)])
+    }
+  }
+
+  const deleteGroup = async (group: Group) => {
+    const ok = await confirm({
+      title: `Eliminar "${group.name}"`,
+      message: 'Se borrarán el grupo, sus miembros y sus competencias. No se puede deshacer.',
+      confirmLabel: 'Eliminar grupo',
+      tone: 'danger',
+    })
+    if (!ok) return
+
+    const done = await runAction(group.id, () => groupService.deleteGroup(group.id), 'Grupo eliminado')
+    if (done) {
+      setSelectedGroupId('')
+      await Promise.all([loadGroups(), loadCompetitions()])
+    }
+  }
+
+  const createCompetition = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!selectedGroupId) return
+
+    const ok = await runAction('competition', () => groupService.createCompetition(selectedGroupId, compForm), 'Competencia creada')
+    if (ok) {
+      setCompForm({ rivalGroupId: '', name: '', startDate: '', endDate: '' })
+      await loadCompetitions()
+    }
+  }
+
+  const loadScore = async (competitionId: string) => {
     try {
-      await groupService.createGroup(groupForm);
-      setGroupForm({ name: "", description: "", groupImageUrl: "" });
-      await loadGroups();
-      setStatusMessage("Grupo creado correctamente");
-      setMobileView("groups");
-    } catch (err: any) {
-      setError(err.response?.data?.error || "No se pudo crear grupo");
+      setBusy(competitionId)
+      const response = await groupService.getCompetitionScore(competitionId)
+      setScores((current) => ({ ...current, [competitionId]: response.data.score || [] }))
+    } catch (err) {
+      emitFeedback({ kind: 'error', title: 'No se ha podido cargar el marcador', message: getErrorMessage(err) })
+    } finally {
+      setBusy('')
     }
-  };
-
-  const invite = async () => {
-    if (!selectedGroupId || !inviteUserId) return;
-    try {
-      await groupService.inviteMember(selectedGroupId, inviteUserId);
-      setInviteUserId("");
-      setStatusMessage("Miembro agregado al grupo");
-    } catch (err: any) {
-      setError(err.response?.data?.error || "No se pudo invitar miembro");
-    }
-  };
-
-  const createCompetition = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedGroupId) return;
-    if (
-      compForm.startDate &&
-      compForm.endDate &&
-      compForm.endDate < compForm.startDate
-    ) {
-      setError("La fecha de fin no puede ser menor a la fecha de inicio");
-      return;
-    }
-    try {
-      await groupService.createCompetition(selectedGroupId, compForm);
-      setCompForm({ rivalGroupId: "", name: "", startDate: "", endDate: "" });
-      await loadCompetitions();
-      setStatusMessage("Competencia creada");
-      if (!isLargeScreen) setMobileView("competitions");
-    } catch (err: any) {
-      setError(err.response?.data?.error || "No se pudo crear competencia");
-    }
-  };
+  }
 
   const lookupGroup = async () => {
-    if (!joinLookupId.trim()) return;
+    const id = joinLookupId.trim()
+    if (!id) return
     try {
-      const response = await groupService.lookupGroup(joinLookupId.trim());
-      setJoinLookupResult({
-        id: response.data.group.id,
-        name: response.data.group.name,
-      });
-      setStatusMessage(
-        "Grupo encontrado. Pide invitacion a un administrador de ese grupo.",
-      );
-    } catch {
-      setJoinLookupResult(null);
-      setStatusMessage("No se encontro grupo con ese ID");
+      setBusy('lookup')
+      const response = await groupService.lookupGroup(id)
+      setLookupResult(response.data.group)
+    } catch (err) {
+      setLookupResult(null)
+      emitFeedback({ kind: 'warning', title: 'Grupo no encontrado', message: getErrorMessage(err) })
+    } finally {
+      setBusy('')
     }
-  };
+  }
 
-  const showScore = async (competitionId: string) => {
-    try {
-      const response = await groupService.getCompetitionScore(competitionId);
-      const score = response.data.score || [];
-      const competition = competitions.find((c) => c.id === competitionId);
-      const printable = score
-        .map((s: any) => {
-          const label = competition
-            ? s.group_id === competition.group_id_1
-              ? competition.group_1_name
-              : s.group_id === competition.group_id_2
-                ? competition.group_2_name
-                : s.group_id
-            : s.group_id;
-          return `${label}: ${Number(s.total_volume).toFixed(2)} kg`;
-        })
-        .join(" | ");
-      setScoresByCompetition((prev) => ({
-        ...prev,
-        [competitionId]: printable || "Sin puntaje aun",
-      }));
-    } catch {
-      setScoresByCompetition((prev) => ({
-        ...prev,
-        [competitionId]: "No se pudo cargar puntaje",
-      }));
-    }
-  };
+  const requestJoin = async (groupId: string) => {
+    const ok = await runAction('request-join', () => groupService.requestJoin(groupId), 'Solicitud enviada')
+    if (ok) setLookupResult((current) => (current ? { ...current, has_pending_request: true } : current))
+  }
 
   const copyText = async (value: string, label: string) => {
     try {
-      await navigator.clipboard.writeText(value);
-      setStatusMessage(`${label} copiado`);
+      await navigator.clipboard.writeText(value)
+      emitFeedback({ kind: 'info', title: `${label} copiado` })
     } catch {
-      setStatusMessage(`No se pudo copiar ${label}`);
+      emitFeedback({ kind: 'warning', title: 'Tu navegador ha bloqueado el portapapeles' })
     }
-  };
+  }
 
-  const visibleGroups = useMemo(
-    () =>
-      groups
-        .filter((g) => g.name.toLowerCase().includes(groupQuery.toLowerCase()))
-        .sort((a, b) =>
-          sortAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name),
-        ),
-    [groups, groupQuery, sortAsc],
-  );
+  const visibleGroups = useMemo(() => {
+    const query = groupQuery.trim().toLowerCase()
+    if (!query) return groups
+    return groups.filter((group) => group.name.toLowerCase().includes(query))
+  }, [groups, groupQuery])
 
-  const visibleCompetitions = useMemo(
-    () =>
-      competitions
-        .filter(
-          (c) =>
-            c.name.toLowerCase().includes(competitionQuery.toLowerCase()) ||
-            c.group_1_name
-              .toLowerCase()
-              .includes(competitionQuery.toLowerCase()) ||
-            c.group_2_name
-              .toLowerCase()
-              .includes(competitionQuery.toLowerCase()),
-        )
-        .sort((a, b) =>
-          sortAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name),
-        ),
-    [competitions, competitionQuery, sortAsc],
-  );
+  const invitableFriends = useMemo(
+    () => friends.filter((friend) => !members.some((member) => member.user_id === friend.friend_id)),
+    [friends, members]
+  )
 
-  const showGroupsPanel = isLargeScreen || mobileView === "groups";
-  const showCompetitionsPanel = isLargeScreen || mobileView === "competitions";
-  const showManagePanel = isLargeScreen || mobileView === "manage";
+  const isCreator = selectedGroup?.creator_id === currentUserId
+  const hasGroups = groups.length > 0
 
   return (
     <>
       <Navbar />
+      {confirmDialog}
       <main id="main-content" className="page-shell">
         <PageHeader
           icon={<Swords className="title-icon" />}
           title="Grupos"
-          subtitle="En móvil vas por pasos; en escritorio ves todo a la vez."
+          subtitle="Entrena en equipo, gestiona miembros y reta a otros grupos."
+          actions={
+            <button
+              className="btn-soft btn-sm"
+              onClick={() => {
+                loadGroups()
+                loadCompetitions()
+              }}
+              disabled={loadingGroups}
+            >
+              <RefreshCw size={14} className={loadingGroups ? 'animate-spin' : ''} />
+              Actualizar
+            </button>
+          }
+          meta={
+            <>
+              <span className="tiny-badge">Grupos: {groups.length}</span>
+              <span className="tiny-badge">Competencias: {competitions.length}</span>
+              {joinRequests.length > 0 && (
+                <span className="tiny-badge tiny-badge-warning">Solicitudes: {joinRequests.length}</span>
+              )}
+            </>
+          }
         />
 
-        {error && <div className="mb-4 status-error">{error}</div>}
-        {statusMessage && (
-          <div className="mb-4 status-success">{statusMessage}</div>
-        )}
-        <div className="sr-only" aria-live="polite">
-          {statusMessage}
-        </div>
-
-        <div className="kpi-strip mb-4">
-          <span className="tiny-badge">Grupos: {groups.length}</span>
-          <span className="tiny-badge">
-            Competencias: {competitions.length}
-          </span>
-          <button
-            className="btn-soft text-sm inline-flex items-center gap-1"
-            onClick={loadGroups}
-          >
-            <RefreshCw size={14} />
-            Refrescar grupos
-          </button>
-          <button
-            className="btn-soft text-sm inline-flex items-center gap-1"
-            onClick={loadCompetitions}
-          >
-            <RefreshCw size={14} />
-            Refrescar guerras
-          </button>
-        </div>
-
-        {!isLargeScreen && !hasGroups && (
-          <div className="mobile-tabs mb-4">
-            <button
-              className={`mobile-tab ${mobileView === "onboarding" ? "active" : ""}`}
-              onClick={() => setMobileView("onboarding")}
-            >
-              Crear / unirme
-            </button>
+        {error && (
+          <div role="alert" className="status-error mb-4">
+            {error}
           </div>
         )}
 
-        {!isLargeScreen && hasGroups && (
-          <div className="mobile-tabs mb-4">
-            <button
-              className={`mobile-tab ${mobileView === "groups" ? "active" : ""}`}
-              onClick={() => setMobileView("groups")}
-            >
-              Mis grupos
-            </button>
-            <button
-              className={`mobile-tab ${mobileView === "competitions" ? "active" : ""}`}
-              onClick={() => setMobileView("competitions")}
-            >
-              Competencias
-            </button>
-            <button
-              className={`mobile-tab ${mobileView === "manage" ? "active" : ""}`}
-              onClick={() => setMobileView("manage")}
-            >
-              Gestion
-            </button>
-          </div>
-        )}
-
-        {!hasGroups ? (
-          <section className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            <article className="panel p-5 stack-gap">
-              <h2 className="text-2xl font-semibold text-slate-900 dark:text-slate-100 inline-flex items-center gap-2">
-                <PlusCircle size={20} />
-                Nuevo grupo
+        {loadingGroups ? (
+          <SkeletonList count={3} />
+        ) : !hasGroups ? (
+          <section className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <article className="panel space-y-3 p-5">
+              <h2 className="inline-flex items-center gap-2 text-xl font-semibold">
+                <PlusCircle size={19} />
+                Crea tu primer grupo
               </h2>
-              <form onSubmit={createGroup} className="space-y-2">
+              <p className="section-subtitle">Reúne a tus amigos y comparad el volumen que levantáis.</p>
+              <form onSubmit={createGroup} className="space-y-3">
                 <input
                   className="field"
                   placeholder="Nombre del grupo"
                   value={groupForm.name}
-                  onChange={(e) =>
-                    setGroupForm((s) => ({ ...s, name: e.target.value }))
-                  }
+                  onChange={(event) => setGroupForm((state) => ({ ...state, name: event.target.value }))}
                   required
+                  maxLength={100}
+                  aria-label="Nombre del grupo"
                 />
                 <textarea
                   className="field"
-                  placeholder="Descripcion"
+                  placeholder="Descripción (opcional)"
                   value={groupForm.description}
-                  onChange={(e) =>
-                    setGroupForm((s) => ({ ...s, description: e.target.value }))
-                  }
+                  onChange={(event) => setGroupForm((state) => ({ ...state, description: event.target.value }))}
+                  aria-label="Descripción del grupo"
                 />
-                <input
-                  className="field"
-                  placeholder="URL de foto de grupo"
-                  value={groupForm.groupImageUrl}
-                  onChange={(e) =>
-                    setGroupForm((s) => ({
-                      ...s,
-                      groupImageUrl: e.target.value,
-                    }))
-                  }
-                />
-                <button className="btn-primary inline-flex items-center gap-1">
-                  <PlusCircle size={14} />
-                  Crear ahora
+                <button className="btn-primary w-full" disabled={busy === 'create'}>
+                  <PlusCircle size={15} />
+                  Crear grupo
                 </button>
               </form>
             </article>
 
-            <article className="panel p-5 stack-gap">
-              <h2 className="text-2xl font-semibold text-slate-900 dark:text-slate-100 inline-flex items-center gap-2">
-                <Users size={20} />
-                Unirme
+            <article className="panel space-y-3 p-5">
+              <h2 className="inline-flex items-center gap-2 text-xl font-semibold">
+                <Users size={19} />
+                Unirte a uno existente
               </h2>
-              <p className="soft-text">
-                Si te comparten un ID de grupo, puedes localizarlo y pedir
-                invitacion.
-              </p>
+              <p className="section-subtitle">Si te han pasado el ID de un grupo, pídelo aquí.</p>
               <div className="flex gap-2">
                 <input
                   className="field"
                   value={joinLookupId}
-                  onChange={(e) => setJoinLookupId(e.target.value)}
-                  placeholder="Pega ID de grupo"
+                  onChange={(event) => setJoinLookupId(event.target.value)}
+                  placeholder="Pega el ID del grupo"
+                  aria-label="ID del grupo"
                 />
-                <button
-                  className="btn-soft"
-                  onClick={lookupGroup}
-                  type="button"
-                >
+                <button className="btn-soft" onClick={lookupGroup} type="button" disabled={busy === 'lookup'}>
                   Buscar
                 </button>
               </div>
-              {joinLookupResult ? (
-                <div className="status-info">
-                  Grupo: <strong>{joinLookupResult.name}</strong>
-                  <div className="mt-1">
+
+              {lookupResult && (
+                <div className="list-row space-y-2">
+                  <div className="font-semibold">{lookupResult.name}</div>
+                  <div className="soft-text text-sm">{lookupResult.members_count ?? 0} miembros</div>
+                  {lookupResult.is_member ? (
+                    <span className="tiny-badge tiny-badge-success">Ya eres miembro</span>
+                  ) : lookupResult.has_pending_request ? (
+                    <span className="tiny-badge tiny-badge-warning">Solicitud pendiente de aprobación</span>
+                  ) : (
                     <button
-                      className="btn-soft text-sm"
-                      onClick={() =>
-                        copyText(joinLookupResult.id, "ID de grupo")
-                      }
+                      className="btn-primary btn-sm"
                       type="button"
+                      onClick={() => requestJoin(lookupResult.id)}
+                      disabled={busy === 'request-join'}
                     >
-                      Copiar ID
+                      Solicitar unirme
                     </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="empty-state">
-                  Cuando estes dentro de un grupo, aqui apareceran guerras e
-                  invitaciones avanzadas.
+                  )}
                 </div>
               )}
             </article>
           </section>
         ) : (
-          <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
-            {showGroupsPanel && (
-              <section className="panel p-5 space-y-4 xl:col-span-4">
-                <h2 className="text-2xl font-semibold text-slate-900 dark:text-slate-100 inline-flex items-center gap-2">
-                  <Users size={20} />
-                  Mis grupos
-                </h2>
-                <div className="flex gap-2">
-                  <div className="relative flex-1">
-                    <Search
-                      size={14}
-                      className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500"
-                    />
-                    <input
-                      className="field !pl-7"
-                      value={groupQuery}
-                      onChange={(e) => setGroupQuery(e.target.value)}
-                      placeholder="Filtrar grupos"
-                    />
-                  </div>
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
+            <section className="panel h-fit space-y-4 p-5 xl:col-span-4">
+              <h2 className="inline-flex items-center gap-2 text-xl font-semibold">
+                <Users size={19} />
+                Mis grupos
+              </h2>
+
+              <div className="relative">
+                <Search size={14} className="faint-text absolute left-2.5 top-1/2 -translate-y-1/2" />
+                <input
+                  className="field pl-8"
+                  value={groupQuery}
+                  onChange={(event) => setGroupQuery(event.target.value)}
+                  placeholder="Filtrar grupos"
+                  aria-label="Filtrar grupos"
+                />
+              </div>
+
+              <div className="space-y-2">
+                {visibleGroups.map((group) => (
                   <button
-                    className="btn-soft"
-                    onClick={() => setSortAsc((v) => !v)}
+                    key={group.id}
+                    onClick={() => setSelectedGroupId(group.id)}
+                    className={`list-row clickable-row w-full text-left ${selectedGroupId === group.id ? 'is-selected' : ''}`}
+                    aria-pressed={selectedGroupId === group.id}
                   >
-                    <ArrowDownAZ size={14} />
-                  </button>
-                </div>
-                {loadingGroups && (
-                  <div className="soft-text inline-flex items-center gap-2">
-                    <span className="loader" />
-                    Cargando grupos...
-                  </div>
-                )}
-                <div className="space-y-2">
-                  {visibleGroups.map((g) => (
-                    <button
-                      key={g.id}
-                      onClick={() => setSelectedGroupId(g.id)}
-                      className={`w-full text-left border rounded p-3 clickable-row ${selectedGroupId === g.id ? "border-sky-400 bg-sky-500/10" : "border-slate-500/30 dark:border-slate-700"}`}
-                    >
-                      <div className="font-semibold text-slate-900 dark:text-slate-100">
-                        {g.name}
-                      </div>
-                      <div className="text-xs soft-text">
-                        Miembros: {g.members_count || 0}
-                      </div>
-                      <div className="mt-2 flex gap-2">
-                        <span className="tiny-badge">ID corto</span>
-                        {!isLargeScreen && (
-                          <span
-                            className="tiny-badge"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setMobileView("competitions");
-                            }}
-                          >
-                            Ir a competir
-                          </span>
-                        )}
-                      </div>
-                    </button>
-                  ))}
-                  {visibleGroups.length === 0 && (
-                    <div className="empty-state">
-                      No hay grupos para ese filtro.
-                    </div>
-                  )}
-                </div>
-                {selectedGroupId && (
-                  <button
-                    type="button"
-                    className="btn-soft text-sm inline-flex items-center gap-1"
-                    onClick={() => copyText(selectedGroupId, "ID de grupo")}
-                  >
-                    <Copy size={14} />
-                    Copiar ID del grupo seleccionado
-                  </button>
-                )}
-                {selectedGroup && (
-                  <div className="panel p-4 stack-gap">
-                    <div className="flex items-start gap-3">
-                      <div className="w-16 h-16 rounded-lg overflow-hidden border border-slate-400/30 dark:border-slate-700 bg-slate-200 dark:bg-slate-800 shrink-0">
-                        {selectedGroup.group_image_url ? (
-                          <img
-                            src={selectedGroup.group_image_url}
-                            alt={selectedGroup.name}
-                            className="w-full h-full object-cover"
-                          />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-slate-500">
-                            <ImagePlus size={24} />
-                          </div>
-                        )}
-                      </div>
-                      <div>
-                        <h3 className="font-semibold text-slate-900 dark:text-slate-100">
-                          {selectedGroup.name}
-                        </h3>
-                        <div className="text-xs soft-text">
-                          {selectedGroup.description || "Sin descripción"}
-                        </div>
-                        <div className="text-xs soft-text mt-1">
-                          Creador:{" "}
-                          {selectedGroup.creator_username || "Desconocido"}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <span className="tiny-badge">
-                        Miembros: {selectedGroup.members_count || 0}
-                      </span>
-                      {selectedGroup.routine_name && (
-                        <span className="tiny-badge">
-                          Rutina: {selectedGroup.routine_name}
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="font-semibold">{group.name}</span>
+                      {group.is_creator && (
+                        <span className="tiny-badge shrink-0">
+                          <Crown size={11} />
+                          Creador
                         </span>
                       )}
                     </div>
-                    <div className="text-xs soft-text break-all">
-                      ID: {selectedGroup.id}
+                    <div className="soft-text text-xs">
+                      {group.members_count ?? 0} miembros
+                      {group.routine_name ? ` · ${group.routine_name}` : ''}
                     </div>
-                  </div>
-                )}
-              </section>
-            )}
+                    {(group.pending_requests_count ?? 0) > 0 && (
+                      <span className="tiny-badge tiny-badge-warning mt-1.5">
+                        {group.pending_requests_count} solicitud(es)
+                      </span>
+                    )}
+                  </button>
+                ))}
+                {visibleGroups.length === 0 && <div className="empty-state">Ningún grupo coincide.</div>}
+              </div>
 
-            {showCompetitionsPanel && (
-              <section
-                className={`panel p-5 space-y-4 xl:col-span-5 relative ${warsInMaintenance ? "opacity-60" : ""}`}
-              >
-                <h2 className="text-2xl font-semibold text-slate-900 dark:text-slate-100 inline-flex items-center gap-2">
-                  <Swords size={20} />
-                  Competencias
-                </h2>
-                {warsInMaintenance && (
-                  <div className="status-warning">
-                    Sistema de guerras en mantenimiento. Volverá pronto.
-                  </div>
-                )}
-                <div className="relative">
-                  <Search
-                    size={14}
-                    className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500"
-                  />
-                  <input
-                    className="field !pl-7"
-                    value={competitionQuery}
-                    onChange={(e) => setCompetitionQuery(e.target.value)}
-                    placeholder="Filtrar competencias"
-                  />
-                </div>
-                {loadingCompetitions && (
-                  <div className="soft-text inline-flex items-center gap-2">
-                    <span className="loader" />
-                    Cargando competencias...
-                  </div>
-                )}
-                <div className="space-y-2 max-h-[62vh] overflow-auto pr-1">
-                  {visibleCompetitions.map((c) => (
-                    <div
-                      key={c.id}
-                      className="border border-slate-500/30 dark:border-slate-700 rounded p-3 bg-white/40 dark:bg-slate-900/35"
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <div className="font-semibold text-slate-900 dark:text-slate-100">
-                            {c.name}
-                          </div>
-                          <div className="text-sm soft-text">
-                            {c.group_1_name} vs {c.group_2_name}
-                          </div>
-                        </div>
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => showScore(c.id)}
-                            className="btn-soft text-sm"
-                            disabled={warsInMaintenance}
-                          >
-                            Ver score
-                          </button>
-                          <button
-                            onClick={() => copyText(c.id, "ID de competencia")}
-                            className="btn-soft text-sm inline-flex items-center gap-1"
-                          >
-                            <Copy size={14} />
-                            Copiar
-                          </button>
-                        </div>
+              <form onSubmit={createGroup} className="space-y-2 pt-2" style={{ borderTop: '1px solid var(--line)' }}>
+                <label className="field-label pt-2">Crear otro grupo</label>
+                <input
+                  className="field"
+                  placeholder="Nombre del grupo"
+                  value={groupForm.name}
+                  onChange={(event) => setGroupForm((state) => ({ ...state, name: event.target.value }))}
+                  required
+                  maxLength={100}
+                />
+                <button className="btn-soft w-full" disabled={busy === 'create'}>
+                  <PlusCircle size={14} />
+                  Crear
+                </button>
+              </form>
+            </section>
+
+            <div className="space-y-6 xl:col-span-8">
+              {selectedGroup && (
+                <section className="panel space-y-4 p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h2 className="text-xl font-semibold">{selectedGroup.name}</h2>
+                      <p className="section-subtitle">{selectedGroup.description || 'Sin descripción'}</p>
+                      <div className="kpi-strip mt-2">
+                        <span className="tiny-badge">{selectedGroup.members_count ?? members.length} miembros</span>
+                        <span className="tiny-badge">Creador: {selectedGroup.creator_username}</span>
+                        {selectedGroup.routine_name && (
+                          <span className="tiny-badge">Rutina: {selectedGroup.routine_name}</span>
+                        )}
                       </div>
-                      {scoresByCompetition[c.id] && (
-                        <div className="mt-2 text-sm text-sky-700 dark:text-cyan-200 border border-cyan-400/30 rounded p-2 bg-cyan-600/10">
-                          {scoresByCompetition[c.id]}
-                        </div>
+                    </div>
+                    <div className="flex shrink-0 flex-wrap gap-2">
+                      <button
+                        className="btn-soft btn-sm"
+                        type="button"
+                        onClick={() => copyText(selectedGroup.id, 'ID del grupo')}
+                      >
+                        <Copy size={14} />
+                        Copiar ID
+                      </button>
+                      {isCreator ? (
+                        <button
+                          className="btn-danger btn-sm"
+                          type="button"
+                          onClick={() => deleteGroup(selectedGroup)}
+                          disabled={busy === selectedGroup.id}
+                        >
+                          <Trash2 size={14} />
+                          Eliminar
+                        </button>
+                      ) : (
+                        <button
+                          className="btn-danger btn-sm"
+                          type="button"
+                          onClick={() =>
+                            removeMember({ user_id: currentUserId ?? '', username: 'tú', joined_at: '' })
+                          }
+                        >
+                          <LogOut size={14} />
+                          Salir
+                        </button>
                       )}
                     </div>
-                  ))}
-                  {visibleCompetitions.length === 0 && (
-                    <div className="empty-state">
-                      No hay competencias para ese filtro.
-                    </div>
-                  )}
-                </div>
-              </section>
-            )}
-
-            {showManagePanel && (
-              <section className="panel p-5 space-y-4 xl:col-span-3">
-                <h2 className="text-2xl font-semibold text-slate-900 dark:text-slate-100 inline-flex items-center gap-2">
-                  <PlusCircle size={20} />
-                  Gestion
-                </h2>
-
-                <form onSubmit={createGroup} className="space-y-2">
-                  <label className="field-label">Nuevo grupo</label>
-                  <input
-                    className="field"
-                    placeholder="Nombre del grupo"
-                    value={groupForm.name}
-                    onChange={(e) =>
-                      setGroupForm((s) => ({ ...s, name: e.target.value }))
-                    }
-                    required
-                  />
-                  <textarea
-                    className="field"
-                    placeholder="Descripcion"
-                    value={groupForm.description}
-                    onChange={(e) =>
-                      setGroupForm((s) => ({
-                        ...s,
-                        description: e.target.value,
-                      }))
-                    }
-                  />
-                  <input
-                    className="field"
-                    placeholder="URL de foto de grupo"
-                    value={groupForm.groupImageUrl}
-                    onChange={(e) =>
-                      setGroupForm((s) => ({
-                        ...s,
-                        groupImageUrl: e.target.value,
-                      }))
-                    }
-                  />
-                  <button className="btn-primary w-full">Crear grupo</button>
-                </form>
-
-                <div className="stack-gap">
-                  <label className="field-label inline-flex items-center gap-1">
-                    <UserPlus size={14} />
-                    Invitar por user ID
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      className="field"
-                      value={inviteUserId}
-                      onChange={(e) => setInviteUserId(e.target.value)}
-                      placeholder="UUID del amigo"
-                    />
-                    <button
-                      onClick={invite}
-                      className="btn-primary"
-                      type="button"
-                    >
-                      Invitar
-                    </button>
                   </div>
-                </div>
 
-                {selectedGroup?.creator_id === currentUserId &&
-                  joinRequests.length > 0 && (
-                    <div className="stack-gap">
-                      <label className="field-label">
-                        Solicitudes de ingreso pendientes
-                      </label>
-                      {joinRequests.map((r) => (
-                        <div
-                          key={r.id}
-                          className="flex items-center justify-between border border-slate-400/30 dark:border-slate-700 rounded p-2"
-                        >
-                          <span className="text-sm text-slate-900 dark:text-slate-100">
-                            {r.username}
+                  <div>
+                    <h3 className="mb-2 font-semibold">Ranking del grupo</h3>
+                    <div className="space-y-2">
+                      {members.map((member, index) => (
+                        <div key={member.user_id} className="list-row flex flex-wrap items-center justify-between gap-2">
+                          <button
+                            type="button"
+                            className="min-w-0 flex-1 text-left"
+                            onClick={() => navigate(`/users/${member.user_id}`)}
+                          >
+                            <span className="faint-text mr-1.5 tabular-nums">{index + 1}.</span>
+                            <span className="font-semibold">{member.username}</span>
+                            {member.is_creator && <Crown size={12} className="ml-1.5 inline" />}
+                          </button>
+                          <span className="shrink-0 font-semibold tabular-nums" style={{ color: 'var(--brand-strong)' }}>
+                            {kg(member.total_volume ?? 0)}
                           </span>
-                          <div className="flex gap-2">
+                          {isCreator && member.user_id !== currentUserId && (
                             <button
+                              className="btn-danger btn-xs shrink-0"
                               type="button"
-                              className="btn-soft text-xs"
-                              onClick={() =>
-                                respondJoinRequest(r.id, "accepted")
-                              }
+                              onClick={() => removeMember(member)}
+                              disabled={busy === member.user_id}
+                              aria-label={`Expulsar a ${member.username}`}
                             >
-                              Aceptar
+                              <Trash2 size={12} />
                             </button>
-                            <button
-                              type="button"
-                              className="btn-soft text-xs"
-                              onClick={() =>
-                                respondJoinRequest(r.id, "rejected")
-                              }
-                            >
-                              Rechazar
-                            </button>
-                          </div>
+                          )}
                         </div>
                       ))}
+                      {members.length === 0 && <div className="empty-state">Sin miembros todavía.</div>}
                     </div>
-                  )}
-
-                <form
-                  onSubmit={createCompetition}
-                  className={`stack-gap ${warsInMaintenance ? "opacity-60" : ""}`}
-                >
-                  <label className="field-label inline-flex items-center gap-1">
-                    <Trophy size={14} />
-                    Crear guerra
-                  </label>
-                  <input
-                    className="field"
-                    value={compForm.name}
-                    onChange={(e) =>
-                      setCompForm((s) => ({ ...s, name: e.target.value }))
-                    }
-                    placeholder="Nombre de la guerra"
-                    required
-                  />
-                  <select
-                    className="field"
-                    value={compForm.rivalGroupId}
-                    onChange={(e) =>
-                      setCompForm((s) => ({
-                        ...s,
-                        rivalGroupId: e.target.value,
-                      }))
-                    }
-                    required
-                  >
-                    <option value="">Selecciona grupo rival</option>
-                    {groups
-                      .filter((g) => g.id !== selectedGroupId)
-                      .map((g) => (
-                        <option key={g.id} value={g.id}>
-                          {g.name}
-                        </option>
-                      ))}
-                  </select>
-                  <input
-                    type="date"
-                    className="field"
-                    value={compForm.startDate}
-                    onChange={(e) =>
-                      setCompForm((s) => ({ ...s, startDate: e.target.value }))
-                    }
-                  />
-                  <input
-                    type="date"
-                    className="field"
-                    value={compForm.endDate}
-                    onChange={(e) =>
-                      setCompForm((s) => ({ ...s, endDate: e.target.value }))
-                    }
-                  />
-                  <button
-                    className="btn-primary w-full"
-                    disabled={warsInMaintenance}
-                  >
-                    Crear competencia
-                  </button>
-                </form>
-                {warsInMaintenance && (
-                  <div className="status-info">
-                    Creación de guerras deshabilitada temporalmente por
-                    mantenimiento.
                   </div>
+
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <label className="field-label inline-flex items-center gap-1.5" htmlFor="inviteFriend">
+                        <UserPlus size={13} />
+                        Invitar a un amigo
+                      </label>
+                      <div className="flex gap-2">
+                        <select
+                          id="inviteFriend"
+                          className="field"
+                          value={inviteFriendId}
+                          onChange={(event) => setInviteFriendId(event.target.value)}
+                        >
+                          <option value="">
+                            {invitableFriends.length === 0 ? 'No hay amigos por invitar' : 'Elige un amigo'}
+                          </option>
+                          {invitableFriends.map((friend) => (
+                            <option key={friend.friend_id} value={friend.friend_id}>
+                              {friend.friend_username}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={inviteFriend}
+                          className="btn-primary"
+                          type="button"
+                          disabled={!inviteFriendId || busy === 'invite'}
+                        >
+                          Invitar
+                        </button>
+                      </div>
+                      {friends.length === 0 && (
+                        <p className="soft-text text-xs">Necesitas amigos aceptados para poder invitarlos.</p>
+                      )}
+                    </div>
+
+                    {isCreator && joinRequests.length > 0 && (
+                      <div className="space-y-2">
+                        <span className="field-label">Solicitudes pendientes</span>
+                        {joinRequests.map((request) => (
+                          <div key={request.id} className="list-row flex items-center justify-between gap-2">
+                            <span className="truncate">{request.username}</span>
+                            <div className="flex shrink-0 gap-1.5">
+                              <button
+                                type="button"
+                                className="btn-primary btn-xs"
+                                onClick={() => respondJoinRequest(request.id, 'accepted')}
+                                disabled={busy === request.id}
+                              >
+                                Aceptar
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-soft btn-xs"
+                                onClick={() => respondJoinRequest(request.id, 'rejected')}
+                                disabled={busy === request.id}
+                              >
+                                Rechazar
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )}
+
+              <section className="panel space-y-4 p-5">
+                <div>
+                  <h2 className="inline-flex items-center gap-2 text-xl font-semibold">
+                    <Trophy size={19} />
+                    Competencias
+                  </h2>
+                  <p className="section-subtitle">
+                    Reta a otro grupo: gana el que más volumen acumule en el periodo.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  {competitions.map((competition) => {
+                    const score = scores[competition.id]
+                    const scoreOf = (groupId: string) => score?.find((row) => row.group_id === groupId)
+                    return (
+                      <article key={competition.id} className="list-row space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="font-semibold">{competition.name}</div>
+                            <div className="soft-text text-sm">
+                              {competition.group_1_name} vs {competition.group_2_name}
+                              {competition.start_date ? ` · desde ${competition.start_date}` : ''}
+                              {competition.end_date ? ` hasta ${competition.end_date}` : ''}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => loadScore(competition.id)}
+                            className="btn-soft btn-sm shrink-0"
+                            disabled={busy === competition.id}
+                          >
+                            {score ? 'Actualizar marcador' : 'Ver marcador'}
+                          </button>
+                        </div>
+
+                        {score && (
+                          <div className="grid grid-cols-2 gap-2">
+                            {[
+                              { id: competition.group_id_1, name: competition.group_1_name },
+                              { id: competition.group_id_2, name: competition.group_2_name },
+                            ].map((side) => {
+                              const row = scoreOf(side.id)
+                              const rival = scoreOf(side.id === competition.group_id_1 ? competition.group_id_2 : competition.group_id_1)
+                              const winning = (row?.total_volume ?? 0) > (rival?.total_volume ?? 0)
+                              return (
+                                <div
+                                  key={side.id}
+                                  className="panel-sunken p-3"
+                                  style={
+                                    winning
+                                      ? { borderColor: 'color-mix(in srgb, var(--success) 45%, transparent)' }
+                                      : undefined
+                                  }
+                                >
+                                  <div className="soft-text truncate text-xs font-semibold uppercase">{side.name}</div>
+                                  <div className="text-xl font-bold tabular-nums">{kg(row?.total_volume ?? 0)}</div>
+                                  <div className="faint-text text-xs">
+                                    {row?.members_count ?? 0} miembros · {row?.sessions ?? 0} registros
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </article>
+                    )
+                  })}
+                  {competitions.length === 0 && (
+                    <div className="empty-state">Todavía no hay competencias. Crea una abajo.</div>
+                  )}
+                </div>
+
+                {selectedGroupId && (
+                  <form onSubmit={createCompetition} className="space-y-3 pt-3" style={{ borderTop: '1px solid var(--line)' }}>
+                    <h3 className="pt-2 font-semibold">Crear competencia desde "{selectedGroup?.name}"</h3>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      <input
+                        className="field"
+                        value={compForm.name}
+                        onChange={(event) => setCompForm((state) => ({ ...state, name: event.target.value }))}
+                        placeholder="Nombre de la competencia"
+                        required
+                        maxLength={100}
+                        aria-label="Nombre de la competencia"
+                      />
+                      <select
+                        className="field"
+                        value={compForm.rivalGroupId}
+                        onChange={(event) => setCompForm((state) => ({ ...state, rivalGroupId: event.target.value }))}
+                        required
+                        aria-label="Grupo rival"
+                      >
+                        <option value="">Selecciona el grupo rival</option>
+                        {groups
+                          .filter((group) => group.id !== selectedGroupId)
+                          .map((group) => (
+                            <option key={group.id} value={group.id}>
+                              {group.name}
+                            </option>
+                          ))}
+                      </select>
+                      <div>
+                        <label className="field-label" htmlFor="compStart">
+                          Inicio (opcional)
+                        </label>
+                        <input
+                          id="compStart"
+                          type="date"
+                          className="field"
+                          value={compForm.startDate}
+                          onChange={(event) => setCompForm((state) => ({ ...state, startDate: event.target.value }))}
+                        />
+                      </div>
+                      <div>
+                        <label className="field-label" htmlFor="compEnd">
+                          Fin (opcional)
+                        </label>
+                        <input
+                          id="compEnd"
+                          type="date"
+                          className="field"
+                          min={compForm.startDate || undefined}
+                          value={compForm.endDate}
+                          onChange={(event) => setCompForm((state) => ({ ...state, endDate: event.target.value }))}
+                        />
+                      </div>
+                    </div>
+                    {groups.length < 2 && (
+                      <p className="soft-text text-sm">
+                        Necesitas pertenecer a dos grupos para poder crear una competencia entre ellos.
+                      </p>
+                    )}
+                    <button className="btn-primary" disabled={busy === 'competition' || groups.length < 2}>
+                      <Swords size={15} />
+                      Crear competencia
+                    </button>
+                  </form>
                 )}
               </section>
-            )}
+            </div>
           </div>
         )}
       </main>
     </>
-  );
+  )
 }

@@ -1,16 +1,19 @@
 services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: gymesis
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports:
-      - '5432:5432'
+      POSTGRES_DB: ${DB_NAME:-gymesis}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    # Sin puertos publicados: solo el backend necesita hablar con la base.
+    # Descomenta si quieres conectarte con un cliente SQL desde tu maquina.
+    # ports:
+    #   - '5432:5432'
     volumes:
       - gymesis_db:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U postgres -d gymesis']
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-gymesis}']
       interval: 5s
       timeout: 5s
       retries: 10
@@ -18,25 +21,35 @@ services:
   backend:
     build:
       context: ./backend
+    restart: unless-stopped
     environment:
+      NODE_ENV: production
       PORT: 3000
       DB_HOST: db
       DB_PORT: 5432
-      DB_NAME: gymesis
-      DB_USER: postgres
-      DB_PASSWORD: postgres
-      JWT_SECRET: gymesis-dev-secret
+      DB_NAME: ${DB_NAME:-gymesis}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      # Obligatorio: el backend no arranca en produccion con un secreto debil.
+      # Definelo en un archivo .env junto a este docker-compose.yml.
+      JWT_SECRET: ${JWT_SECRET:?Define JWT_SECRET en tu .env (32+ caracteres aleatorios)}
+      JWT_EXPIRY: ${JWT_EXPIRY:-7d}
+      # El frontend habla con la API a traves del proxy de nginx (mismo origen),
+      # asi que no hace falta abrir CORS a ningun dominio externo.
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      - '3000:3000'
+    # Sin puertos publicados: nginx hace de proxy hacia /api.
+    expose:
+      - '3000'
 
   frontend:
     build:
       context: ./frontend
       args:
         VITE_API_URL: /api
+    restart: unless-stopped
     depends_on:
       - backend
     ports:

@@ -1,157 +1,167 @@
-import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import { useEffect } from 'react'
-import { useAuthStore } from './store/authStore.ts'
-import { getVisualSettings } from './utils/settings.ts'
-import Login from './pages/Login.tsx'
-import Register from './pages/Register.tsx'
-import Dashboard from './pages/Dashboard.tsx'
-import Routines from './pages/Routines.tsx'
-import Friends from './pages/Friends.tsx'
-import Trainings from './pages/Trainings.tsx'
-import Groups from './pages/Groups.tsx'
-import Profile from './pages/Profile.tsx'
-import Notifications from './pages/Notifications.tsx'
-import PublicProfile from './pages/PublicProfile.tsx'
-import CalendarPage from './pages/Calendar.tsx'
-import Settings from './pages/Settings.tsx'
-import GlobalFeedbackHost from './components/GlobalFeedbackHost.tsx'
+import { lazy, Suspense, useEffect, type ReactNode } from 'react'
+import { BrowserRouter as Router, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { useAuthStore } from './store/authStore'
+import { getVisualSettings } from './utils/settings'
+import { emitFeedback } from './utils/feedback'
+import GlobalFeedbackHost from './components/GlobalFeedbackHost'
+import ErrorBoundary from './components/ErrorBoundary'
+import Login from './pages/Login'
+import Register from './pages/Register'
 
-function ProtectedRoute({ children }: { children: React.ReactNode }) {
+// Sólo el login y el registro entran en el bundle inicial: el resto se carga
+// cuando se visita, así la primera pantalla pesa mucho menos.
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const Routines = lazy(() => import('./pages/Routines'))
+const Friends = lazy(() => import('./pages/Friends'))
+const Trainings = lazy(() => import('./pages/Trainings'))
+const Groups = lazy(() => import('./pages/Groups'))
+const Profile = lazy(() => import('./pages/Profile'))
+const Notifications = lazy(() => import('./pages/Notifications'))
+const PublicProfile = lazy(() => import('./pages/PublicProfile'))
+const CalendarPage = lazy(() => import('./pages/Calendar'))
+const Settings = lazy(() => import('./pages/Settings'))
+const NotFound = lazy(() => import('./pages/NotFound'))
+
+const REDIRECT_KEY = 'gymesis-redirect-after-login'
+const LAST_ROUTE_KEY = 'gymesis-last-route'
+
+function PageFallback() {
+  return (
+    <div className="page-shell">
+      <div className="panel flex items-center gap-3 p-6 soft-text">
+        <span className="loader" />
+        Cargando...
+      </div>
+    </div>
+  )
+}
+
+function ProtectedRoute({ children }: { children: ReactNode }) {
   const isLoggedIn = useAuthStore((state) => state.isLoggedIn)
   const location = useLocation()
-  
+
   if (!isLoggedIn) {
-    localStorage.setItem('gymesis-redirect-after-login', location.pathname)
-    return <Navigate to="/login" replace />
+    // El destino se pasa por el state de la navegación, no escribiendo en
+    // localStorage durante el render (eso era un efecto secundario en render).
+    return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />
   }
-  
+
   return <>{children}</>
 }
 
-function RouteEnhancer() {
+/** Impide volver al login/registro con la sesión ya iniciada. */
+function PublicOnlyRoute({ children }: { children: ReactNode }) {
+  const isLoggedIn = useAuthStore((state) => state.isLoggedIn)
+  if (isLoggedIn) return <Navigate to="/dashboard" replace />
+  return <>{children}</>
+}
+
+function AppEffects() {
   const location = useLocation()
+  const navigate = useNavigate()
 
   useEffect(() => {
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+    window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior })
     if (location.pathname !== '/login' && location.pathname !== '/register') {
-      localStorage.setItem('gymesis-last-route', location.pathname)
+      try {
+        localStorage.setItem(LAST_ROUTE_KEY, location.pathname)
+      } catch {
+        /* almacenamiento bloqueado */
+      }
     }
   }, [location.pathname])
+
+  // Sesión caducada: el interceptor de axios avisa y aquí se navega sin recargar.
+  useEffect(() => {
+    const onExpired = () => {
+      try {
+        localStorage.setItem(REDIRECT_KEY, window.location.pathname)
+      } catch {
+        /* almacenamiento bloqueado */
+      }
+      emitFeedback({ kind: 'warning', title: 'Sesión caducada', message: 'Vuelve a iniciar sesión para continuar.' })
+      navigate('/login', { replace: true })
+    }
+
+    window.addEventListener('gymesis-session-expired', onExpired)
+    return () => window.removeEventListener('gymesis-session-expired', onExpired)
+  }, [navigate])
 
   return null
 }
 
-function App() {
-  const loadFromStorage = useAuthStore((state) => state.loadFromStorage)
-  
-  useEffect(() => {
-    loadFromStorage()
-    const visual = getVisualSettings()
-    if (visual.compactMode) {
-      document.documentElement.classList.add('compact-ui')
-    } else {
-      document.documentElement.classList.remove('compact-ui')
-    }
-  }, [loadFromStorage])
+function RootRedirect() {
+  const isLoggedIn = useAuthStore((state) => state.isLoggedIn)
+  if (!isLoggedIn) return <Navigate to="/login" replace />
 
-  return (
-    <Router>
-      <GlobalFeedbackHost />
-      <RouteEnhancer />
-      <a
-        href="#main-content"
-        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-[9999] focus:bg-sky-600 focus:text-white focus:px-3 focus:py-2 focus:rounded"
-      >
-        Saltar al contenido principal
-      </a>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
-        <Route
-          path="/dashboard"
-          element={
-            <ProtectedRoute>
-              <Dashboard />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/routines"
-          element={
-            <ProtectedRoute>
-              <Routines />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/friends"
-          element={
-            <ProtectedRoute>
-              <Friends />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/trainings"
-          element={
-            <ProtectedRoute>
-              <Trainings />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/groups"
-          element={
-            <ProtectedRoute>
-              <Groups />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/profile"
-          element={
-            <ProtectedRoute>
-              <Profile />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/notifications"
-          element={
-            <ProtectedRoute>
-              <Notifications />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/calendar"
-          element={
-            <ProtectedRoute>
-              <CalendarPage />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/settings"
-          element={
-            <ProtectedRoute>
-              <Settings />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/users/:userId"
-          element={
-            <ProtectedRoute>
-              <PublicProfile />
-            </ProtectedRoute>
-          }
-        />
-        <Route path="/" element={<Navigate to={localStorage.getItem('gymesis-last-route') || '/dashboard'} replace />} />
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
-      </Routes>
-    </Router>
-  )
+  let last = '/dashboard'
+  try {
+    last = localStorage.getItem(LAST_ROUTE_KEY) || '/dashboard'
+  } catch {
+    /* almacenamiento bloqueado */
+  }
+  return <Navigate to={last} replace />
 }
 
-export default App
+const PROTECTED_ROUTES: Array<{ path: string; element: ReactNode }> = [
+  { path: '/dashboard', element: <Dashboard /> },
+  { path: '/routines', element: <Routines /> },
+  { path: '/friends', element: <Friends /> },
+  { path: '/trainings', element: <Trainings /> },
+  { path: '/groups', element: <Groups /> },
+  { path: '/profile', element: <Profile /> },
+  { path: '/notifications', element: <Notifications /> },
+  { path: '/calendar', element: <CalendarPage /> },
+  { path: '/settings', element: <Settings /> },
+  { path: '/users/:userId', element: <PublicProfile /> },
+]
+
+export default function App() {
+  useEffect(() => {
+    document.documentElement.classList.toggle('compact-ui', getVisualSettings().compactMode)
+  }, [])
+
+  return (
+    <ErrorBoundary>
+      <Router>
+        <GlobalFeedbackHost />
+        <AppEffects />
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-[9999] btn-primary"
+        >
+          Saltar al contenido principal
+        </a>
+        <Suspense fallback={<PageFallback />}>
+          <Routes>
+            <Route
+              path="/login"
+              element={
+                <PublicOnlyRoute>
+                  <Login />
+                </PublicOnlyRoute>
+              }
+            />
+            <Route
+              path="/register"
+              element={
+                <PublicOnlyRoute>
+                  <Register />
+                </PublicOnlyRoute>
+              }
+            />
+
+            {PROTECTED_ROUTES.map(({ path, element }) => (
+              <Route key={path} path={path} element={<ProtectedRoute>{element}</ProtectedRoute>} />
+            ))}
+
+            <Route path="/" element={<RootRedirect />} />
+            {/* Una URL desconocida muestra un 404 real en vez de tragárselo
+                con una redirección silenciosa al dashboard. */}
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </Suspense>
+      </Router>
+    </ErrorBoundary>
+  )
+}
